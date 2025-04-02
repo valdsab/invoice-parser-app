@@ -1,0 +1,81 @@
+/**
+ * Custom styles for Invoice Parser application
+ */
+
+/* Processing step styles */
+.step-pending .step-icon {
+    opacity: 0.5;
+}
+
+.step-processing {
+    font-weight: bold;
+}
+
+.step-complete {
+    color: var(--bs-success);
+    font-weight: bold;
+}
+
+.step-error {
+    color: var(--bs-danger);
+    font-weight: bold;
+}
+
+/* Upload status container */
+.upload-status-container {
+    min-height: 120px;
+    border: 1px solid var(--bs-gray-700);
+}
+
+/* Add spacing between sections */
+.card {
+    margin-bottom: 2rem;
+}
+
+/* File input styling */
+.form-control[type=file] {
+    padding: 0.75rem;
+    line-height: 1.5;
+}
+
+/* Table cell alignment */
+.table th, .table td {
+    vertical-align: middle;
+}
+
+/* Invoice history actions */
+.view-invoice-btn, .create-bill-btn {
+    margin-right: 0.25rem;
+}
+
+/* Step icon styling */
+.step-icon {
+    margin-right: 0.5rem;
+    width: 1.2em;
+    text-align: center;
+}
+
+/* Ensure line item table is responsive */
+#line-items-table {
+    min-width: 600px;
+}
+
+/* Create some space for footer */
+body {
+    padding-bottom: 60px;
+}
+
+/* Adjust spacing for mobile */
+@media (max-width: 768px) {
+    .card-body {
+        padding: 1rem;
+    }
+    
+    h3.card-title {
+        font-size: 1.25rem;
+    }
+    
+    .upload-status-container {
+        min-height: 100px;
+    }
+}

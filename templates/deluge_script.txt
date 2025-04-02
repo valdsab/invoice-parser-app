@@ -1,0 +1,110 @@
+/*
+ * Deluge Script for Zoho Books - Vendor Bill Creation
+ * 
+ * This script receives parsed invoice data and creates a vendor bill in Zoho Books.
+ * It handles vendor lookup by name and creates the vendor bill with line items.
+ */
+
+// Function to create a vendor bill from parsed invoice data
+vendorBillCreate = (invoiceData) => {
+    try {
+        // Extract data from the request
+        vendorName = invoiceData.get("vendor_name");
+        billNumber = invoiceData.get("bill_number");
+        billDate = invoiceData.get("date");
+        dueDate = invoiceData.get("due_date");
+        totalAmount = invoiceData.get("total");
+        lineItems = invoiceData.get("line_items");
+        
+        // Log the incoming data
+        logInfo("Creating vendor bill for: " + vendorName + ", Invoice #: " + billNumber);
+        
+        // Look up vendor by name
+        vendorSearch = zoho.books.getRecords("Vendors", "organization_id", {"name": vendorName});
+        
+        if(vendorSearch.isEmpty()) {
+            // Vendor not found, return error
+            logError("Vendor not found: " + vendorName);
+            return {
+                "success": false,
+                "error": "Vendor not found: " + vendorName
+            };
+        }
+        
+        // Get the first matching vendor
+        vendor = vendorSearch.get(0);
+        vendorId = vendor.get("contact_id");
+        
+        // Prepare vendor bill data
+        vendorBillMap = Map();
+        vendorBillMap.put("vendor_id", vendorId);
+        vendorBillMap.put("bill_number", billNumber);
+        
+        // Set dates if available
+        if(billDate != null) {
+            vendorBillMap.put("date", billDate);
+        }
+        if(dueDate != null) {
+            vendorBillMap.put("due_date", dueDate);
+        }
+        
+        // Prepare line items
+        lineItemsList = List();
+        for(item in lineItems) {
+            lineItemMap = Map();
+            lineItemMap.put("name", item.get("name"));
+            lineItemMap.put("quantity", item.get("quantity"));
+            lineItemMap.put("rate", item.get("rate"));
+            
+            // Add tax if available
+            if(item.containsKey("tax") && item.get("tax") > 0) {
+                lineItemMap.put("tax", item.get("tax"));
+            }
+            
+            lineItemsList.add(lineItemMap);
+        }
+        
+        vendorBillMap.put("line_items", lineItemsList);
+        
+        // Create vendor bill in Zoho Books
+        response = zoho.books.createRecord("VendorBills", "organization_id", vendorBillMap);
+        
+        if(response.get("code") == 0) {
+            // Success
+            vendorBillId = response.get("vendorbill").get("vendor_bill_id");
+            logInfo("Vendor bill created successfully. ID: " + vendorBillId);
+            
+            return {
+                "success": true,
+                "vendor_bill_id": vendorBillId
+            };
+        } else {
+            // Error
+            errorMessage = response.get("message");
+            logError("Error creating vendor bill: " + errorMessage);
+            
+            return {
+                "success": false,
+                "error": errorMessage
+            };
+        }
+        
+    } catch(e) {
+        // Exception handling
+        logError("Exception in vendor bill creation: " + e);
+        return {
+            "success": false,
+            "error": "Exception: " + e
+        };
+    }
+}
+
+// Helper function to log information
+logInfo = (message) => {
+    zoho.books.createRecord("Logs", "organization_id", {"level": "INFO", "message": message});
+}
+
+// Helper function to log errors
+logError = (message) => {
+    zoho.books.createRecord("Logs", "organization_id", {"level": "ERROR", "message": message});
+}
