@@ -35,12 +35,12 @@ def parse_invoice_with_eyelevel(file_path):
         url = "https://api.eyelevel.ai/v1/document/parse"
         
         # Based on error messages, Eyelevel API requires a specific auth format
-        # The error suggests we need to start with an algorithm name
+        # Trying the specific HMAC-SHA256 format as suggested
         headers = {
-            "Authorization": f"ApiKey {api_key}"
+            "Authorization": f"HMAC-SHA256 {api_key}"
         }
         
-        logger.debug("Using Eyelevel.ai API with authentication header format: ApiKey ***")
+        logger.debug("Using Eyelevel.ai API with authentication header format: HMAC-SHA256 ***")
         
         logger.debug(f"Sending file {file_path} to Eyelevel.ai API")
         
