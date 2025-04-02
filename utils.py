@@ -97,6 +97,9 @@ def parse_invoice_with_eyelevel(file_path):
         
         # Initialize the GroundX client
         # We'll need to patch the underlying HTTP client to handle header values properly
+        import httpx
+        from groundx import GroundX
+        from groundx.models import Document
         
         # Create a custom HTTP transport with middleware for header sanitization
         class HeaderSanitizingTransport(httpx.HTTPTransport):
@@ -156,35 +159,51 @@ def parse_invoice_with_eyelevel(file_path):
         logger.debug(f"Document uploaded. Process ID: {process_id}")
         
         logger.debug("Waiting for document processing to complete...")
-        max_wait_time = 60  # maximum wait time in seconds
+        max_wait_time = 25  # reduced maximum wait time to avoid worker timeout (30s limit)
+        min_wait_time = 5   # minimum wait time to allow initial processing
         start_time = time.time()
+        poll_interval = 1.5  # shorter interval for more responsive polling
         
-        while True:
-            status = client.documents.get_processing_status_by_id(process_id=process_id)
-            current_status = status.ingest.status
-            
-            logger.debug(f"Current processing status: {current_status}")
-            
-            if current_status == "complete":
-                logger.debug("Document processing completed successfully")
-                break
-            elif current_status in ("error", "cancelled"):
-                error_msg = f"Document processing failed with status: {current_status}"
-                logger.error(error_msg)
-                return {
-                    'success': False,
-                    'error': error_msg
-                }
-            
-            # Check if we've waited too long
-            if time.time() - start_time > max_wait_time:
-                logger.error(f"Document processing timed out after {max_wait_time} seconds")
-                return {
-                    'success': False,
-                    'error': f"Processing timeout after {max_wait_time} seconds"
-                }
+        # First check status immediately
+        status = client.documents.get_processing_status_by_id(process_id=process_id)
+        current_status = status.ingest.status
+        logger.debug(f"Initial processing status: {current_status}")
+        
+        # If status is already complete, we can proceed
+        if current_status == "complete":
+            logger.debug("Document processing completed immediately")
+        else:
+            # If document needs more time to process, check for a minimal period
+            # but short enough to avoid worker timeout
+            while time.time() - start_time < max_wait_time:
+                status = client.documents.get_processing_status_by_id(process_id=process_id)
+                current_status = status.ingest.status
                 
-            time.sleep(3)
+                logger.debug(f"Current processing status: {current_status}")
+                
+                if current_status == "complete":
+                    logger.debug("Document processing completed successfully")
+                    break
+                elif current_status in ("error", "cancelled"):
+                    error_msg = f"Document processing failed with status: {current_status}"
+                    logger.error(error_msg)
+                    return {
+                        'success': False,
+                        'error': error_msg
+                    }
+                
+                # If we've waited at least the minimum time and status is still processing,
+                # we'll proceed anyway and try to get what data we can
+                if time.time() - start_time > min_wait_time and current_status in ("processing", "training"):
+                    logger.warning(f"Proceeding with partial processing after {int(time.time() - start_time)}s - status: {current_status}")
+                    break
+                    
+                # Sleep briefly between checks
+                time.sleep(poll_interval)
+            
+            # If we exited the loop due to timeout, log it but try to proceed
+            if time.time() - start_time >= max_wait_time and current_status not in ("complete", "error", "cancelled"):
+                logger.warning(f"Document processing timeout after {max_wait_time}s, attempting to proceed with partial results")
         
         # Fetch parsed document
         # Ensure bucket_id is properly formatted before lookup
@@ -200,9 +219,50 @@ def parse_invoice_with_eyelevel(file_path):
         
         logger.debug(f"Retrieving X-Ray data from: {xray_url}")
         
-        # Get full X-Ray output
-        with urllib.request.urlopen(xray_url) as url:
-            xray_data = json.loads(url.read().decode())
+        # Get full X-Ray output with robust error handling
+        try:
+            # Use requests instead of urllib for better error handling
+            response = requests.get(xray_url, timeout=30)
+            
+            # Check for HTTP errors
+            response.raise_for_status()
+            
+            # Verify content type is JSON
+            content_type = response.headers.get('Content-Type', '')
+            if 'application/json' not in content_type.lower():
+                error_preview = response.text[:200] + '...' if len(response.text) > 200 else response.text
+                logger.error(f"X-Ray URL returned non-JSON response. Content-Type: {content_type}")
+                logger.error(f"Response preview: {error_preview}")
+                raise ValueError(f"Expected JSON response but got {content_type}. Response starts with: {error_preview[:50]}...")
+            
+            # Parse JSON response
+            xray_data = response.json()
+            
+            # Validate that we got valid data with expected fields
+            if not xray_data or not isinstance(xray_data, dict):
+                logger.error(f"X-Ray data is not a valid dictionary: {type(xray_data)}")
+                raise ValueError("Invalid X-Ray data format received")
+                
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"HTTP Error fetching X-Ray data: {e}")
+            error_preview = ""
+            if hasattr(e, 'response') and e.response is not None:
+                error_preview = e.response.text[:200] + '...' if len(e.response.text) > 200 else e.response.text
+                logger.error(f"Error response preview: {error_preview}")
+            raise Exception(f"Failed to fetch X-Ray data: HTTP {e.response.status_code if hasattr(e, 'response') and e.response is not None else 'unknown'}")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching X-Ray data: {e}")
+            raise Exception(f"Network error fetching X-Ray data: {str(e)}")
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse X-Ray JSON data: {e}")
+            # Get a preview of the response if available
+            error_preview = ""
+            if 'response' in locals() and hasattr(response, 'text'):
+                error_preview = response.text[:200] + '...' if len(response.text) > 200 else response.text
+                logger.error(f"Invalid JSON response preview: {error_preview}")
+            raise Exception(f"Failed to parse X-Ray JSON data: {str(e)}. Response preview: {error_preview[:50]}...")
         
         logger.debug("X-Ray data retrieved successfully")
         
