@@ -88,27 +88,100 @@ document.addEventListener('DOMContentLoaded', function() {
         // Upload file
         showStatus('info', 'Uploading invoice file...');
         
+        // Keep track of client-side timeout
+        let processingTimeout;
+        let pollingInterval;
+        let uploadedInvoiceId = null;
+        
         fetch('/upload', {
             method: 'POST',
             body: formData
         })
         .then(response => response.json())
         .then(data => {
-            // Update UI based on response
             if (data.success) {
-                // Upload successful
+                // Upload successful, but we might need to poll if still processing
                 updateStepStatus(stepUpload, 'complete');
-                updateStepStatus(stepParse, 'complete');
-                showStatus('success', 'Invoice uploaded and parsed successfully!');
                 
                 // Store current invoice ID
                 currentInvoiceId = data.invoice_id;
+                uploadedInvoiceId = data.invoice_id;
                 
-                // Display invoice details
-                displayInvoiceDetails(data.invoice_data);
-                
-                // Refresh invoice history
-                loadInvoiceHistory();
+                // If the invoice is already parsed, display it immediately
+                if (data.invoice_data && data.invoice_data.status === 'parsed') {
+                    updateStepStatus(stepParse, 'complete');
+                    showStatus('success', 'Invoice uploaded and parsed successfully!');
+                    displayInvoiceDetails(data.invoice_data);
+                    loadInvoiceHistory();
+                } else {
+                    // Otherwise, start polling for status updates
+                    updateStepStatus(stepParse, 'processing');
+                    showStatus('info', 'Invoice uploaded. Processing document...');
+                    
+                    // Poll for invoice status updates
+                    let pollCount = 0;
+                    const maxPolls = 20; // Maximum number of polling attempts
+                    
+                    // Set a 60-second client-side timeout for processing
+                    processingTimeout = setTimeout(() => {
+                        // Stop polling
+                        if (pollingInterval) {
+                            clearInterval(pollingInterval);
+                        }
+                        
+                        // Update UI to show timeout
+                        updateStepStatus(stepParse, 'error');
+                        showStatus('error', 'Invoice processing timed out. Please check the invoice history for status updates.');
+                        loadInvoiceHistory();
+                    }, 60000); // 60 seconds timeout
+                    
+                    // Poll every 3 seconds
+                    pollingInterval = setInterval(() => {
+                        pollCount++;
+                        
+                        // Get invoice status
+                        fetch(`/invoices/${uploadedInvoiceId}`)
+                            .then(response => response.json())
+                            .then(invoiceData => {
+                                const status = invoiceData.invoice.status;
+                                
+                                // Update UI based on status
+                                if (status === 'parsed' || status === 'completed') {
+                                    // Stop polling and timeout
+                                    clearInterval(pollingInterval);
+                                    clearTimeout(processingTimeout);
+                                    
+                                    // Update UI
+                                    updateStepStatus(stepParse, 'complete');
+                                    showStatus('success', 'Invoice parsed successfully!');
+                                    displayInvoiceDetails(invoiceData.invoice);
+                                    loadInvoiceHistory();
+                                } else if (status === 'error') {
+                                    // Stop polling and timeout
+                                    clearInterval(pollingInterval);
+                                    clearTimeout(processingTimeout);
+                                    
+                                    // Update UI
+                                    updateStepStatus(stepParse, 'error');
+                                    showStatus('error', `Error parsing invoice: ${invoiceData.invoice.error_message || 'Unknown error'}`);
+                                    loadInvoiceHistory();
+                                } else if (pollCount >= maxPolls) {
+                                    // Stop polling if max attempts reached
+                                    clearInterval(pollingInterval);
+                                    clearTimeout(processingTimeout);
+                                    
+                                    // Update UI
+                                    updateStepStatus(stepParse, 'error');
+                                    showStatus('error', 'Invoice processing took too long. Please check the invoice history for status updates.');
+                                    loadInvoiceHistory();
+                                }
+                            })
+                            .catch(error => {
+                                console.error('Error polling invoice status:', error);
+                                // Continue polling despite errors, timeout will eventually stop it if needed
+                            });
+                    }, 3000); // Poll every 3 seconds
+                }
             } else {
                 // Upload failed
                 updateStepStatus(stepUpload, 'complete');

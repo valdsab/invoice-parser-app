@@ -136,13 +136,57 @@ def upload_invoice():
         if os.path.exists(file_path):
             os.remove(file_path)
 
+def fix_stuck_invoices():
+    """
+    Fix invoices that are stuck in processing state for too long
+    """
+    processing_timeout = 60  # seconds
+    current_time = datetime.datetime.utcnow()
+    
+    try:
+        # Find all invoices in processing state
+        stuck_invoices = Invoice.query.filter_by(status="processing").all()
+        
+        for invoice in stuck_invoices:
+            # Calculate how long the invoice has been in processing state
+            if invoice.updated_at:
+                seconds_in_processing = (current_time - invoice.updated_at).total_seconds()
+                
+                # If processing for more than the timeout, mark as error
+                if seconds_in_processing > processing_timeout:
+                    logger.warning(f"Invoice {invoice.id} stuck in processing state for {int(seconds_in_processing)}s, marking as error")
+                    invoice.status = "error"
+                    invoice.error_message = "Processing timeout - The invoice processing took too long and was aborted."
+                    db.session.commit()
+            else:
+                # If no updated_at timestamp, use created_at
+                seconds_since_created = (current_time - invoice.created_at).total_seconds()
+                if seconds_since_created > processing_timeout:
+                    logger.warning(f"Invoice {invoice.id} stuck in processing state since creation {int(seconds_since_created)}s ago, marking as error")
+                    invoice.status = "error"
+                    invoice.error_message = "Processing timeout - The invoice processing took too long and was aborted."
+                    db.session.commit()
+    except Exception as e:
+        logger.exception(f"Error checking for stuck invoices: {str(e)}")
+        # Don't raise exception as this is just a helper function
+
 @app.route('/invoices', methods=['GET'])
 def list_invoices():
     """Get list of all processed invoices"""
-    invoices = Invoice.query.order_by(Invoice.created_at.desc()).all()
-    return jsonify({
-        'invoices': [invoice.to_dict() for invoice in invoices]
-    })
+    try:
+        # Check for and fix any invoices stuck in processing state
+        fix_stuck_invoices()
+        
+        invoices = Invoice.query.order_by(Invoice.created_at.desc()).all()
+        return jsonify({
+            'invoices': [invoice.to_dict() for invoice in invoices]
+        })
+    except Exception as e:
+        logger.exception(f"Error listing invoices: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/invoices/<int:invoice_id>', methods=['GET'])
 def get_invoice(invoice_id):
