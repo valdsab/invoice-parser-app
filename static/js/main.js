@@ -145,7 +145,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Clear existing line items
         lineItemsTable.innerHTML = '';
         
-        // Load line items
+        // Load line items and raw OCR data
         fetch(`/invoices/${invoiceData.id}`)
             .then(response => response.json())
             .then(data => {
@@ -168,6 +168,58 @@ document.addEventListener('DOMContentLoaded', function() {
                     const row = document.createElement('tr');
                     row.innerHTML = '<td colspan="5" class="text-center">No line items found</td>';
                     lineItemsTable.appendChild(row);
+                }
+                
+                // Add raw OCR data section if available
+                if (data.invoice.parsed_data) {
+                    try {
+                        const parsedData = JSON.parse(data.invoice.parsed_data);
+                        if (parsedData.raw_response) {
+                            // Create raw data section if not exists
+                            let rawDataSection = document.getElementById('raw-ocr-data-section');
+                            if (!rawDataSection) {
+                                const parent = document.querySelector('#invoice-details-container .card-body');
+                                
+                                rawDataSection = document.createElement('div');
+                                rawDataSection.id = 'raw-ocr-data-section';
+                                rawDataSection.className = 'mt-4';
+                                
+                                const heading = document.createElement('h4');
+                                heading.textContent = 'Raw OCR Data (Eyelevel.ai)';
+                                rawDataSection.appendChild(heading);
+                                
+                                const toggleBtn = document.createElement('button');
+                                toggleBtn.className = 'btn btn-sm btn-info mb-2';
+                                toggleBtn.textContent = 'Show/Hide Raw Data';
+                                toggleBtn.onclick = function() {
+                                    const pre = document.getElementById('raw-ocr-json');
+                                    if (pre.classList.contains('d-none')) {
+                                        pre.classList.remove('d-none');
+                                        this.textContent = 'Hide Raw Data';
+                                    } else {
+                                        pre.classList.add('d-none');
+                                        this.textContent = 'Show Raw Data';
+                                    }
+                                };
+                                rawDataSection.appendChild(toggleBtn);
+                                
+                                const pre = document.createElement('pre');
+                                pre.id = 'raw-ocr-json';
+                                pre.className = 'd-none bg-dark text-light p-3 rounded';
+                                pre.style.maxHeight = '500px';
+                                pre.style.overflow = 'auto';
+                                rawDataSection.appendChild(pre);
+                                
+                                parent.appendChild(rawDataSection);
+                            }
+                            
+                            // Update raw data content
+                            const pre = document.getElementById('raw-ocr-json');
+                            pre.textContent = JSON.stringify(parsedData.raw_response, null, 2);
+                        }
+                    } catch (e) {
+                        console.error('Error parsing OCR data:', e);
+                    }
                 }
             })
             .catch(error => {

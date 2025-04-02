@@ -31,18 +31,22 @@ def parse_invoice_with_eyelevel(file_path):
                 'error': 'Eyelevel API key not configured'
             }
         
-        # API endpoint for document parsing
+        # API endpoint for document parsing - using Eyelevel OCR API
         url = "https://api.eyelevel.ai/v1/document/parse"
         
         headers = {
             "Authorization": f"Bearer {api_key}"
         }
         
+        logger.debug(f"Sending file {file_path} to Eyelevel.ai API")
+        
         # Open the file and submit to Eyelevel API
         with open(file_path, 'rb') as file:
             files = {'file': file}
             response = requests.post(url, headers=headers, files=files)
             
+        logger.debug(f"Eyelevel.ai API response status: {response.status_code}")
+        
         if response.status_code != 200:
             logger.error(f"Eyelevel API error: {response.status_code} - {response.text}")
             return {
@@ -52,6 +56,7 @@ def parse_invoice_with_eyelevel(file_path):
             
         # Parse the response
         response_data = response.json()
+        logger.debug(f"Eyelevel.ai API raw response: {json.dumps(response_data, indent=2)}")
         
         # Extract relevant invoice data
         invoice_data = {
@@ -60,7 +65,8 @@ def parse_invoice_with_eyelevel(file_path):
             'invoice_date': response_data.get('date'),
             'due_date': response_data.get('due_date'),
             'total_amount': float(response_data.get('total_amount', 0)),
-            'line_items': []
+            'line_items': [],
+            'raw_response': response_data  # Include the full response for debugging
         }
         
         # Extract line items
@@ -74,6 +80,7 @@ def parse_invoice_with_eyelevel(file_path):
             }
             invoice_data['line_items'].append(line_item)
         
+        logger.debug(f"Extracted invoice data: {json.dumps(invoice_data, indent=2)}")
         return {
             'success': True,
             'data': invoice_data

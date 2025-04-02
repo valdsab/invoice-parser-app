@@ -55,11 +55,13 @@ def upload_invoice():
         logger.debug(f"Processing invoice {invoice.id} - {filename}")
         
         # Parse invoice with Eyelevel.ai
+        logger.debug(f"Sending invoice {invoice.id} to Eyelevel.ai OCR API: {file_path}")
         parse_result = parse_invoice_with_eyelevel(file_path)
         
         if parse_result['success']:
             # Update invoice with parsed data
             invoice_data = parse_result['data']
+            logger.debug(f"OCR success for invoice {invoice.id}. Raw data: {json.dumps(invoice_data, indent=2)}")
             
             invoice.vendor_name = invoice_data.get('vendor_name')
             invoice.invoice_number = invoice_data.get('invoice_number')
@@ -70,6 +72,7 @@ def upload_invoice():
                     invoice.invoice_date = datetime.datetime.strptime(
                         invoice_data.get('invoice_date'), '%Y-%m-%d'
                     ).date()
+                    logger.debug(f"Parsed invoice date: {invoice.invoice_date}")
                 except ValueError:
                     logger.error(f"Invalid invoice date format: {invoice_data.get('invoice_date')}")
             
@@ -78,6 +81,7 @@ def upload_invoice():
                     invoice.due_date = datetime.datetime.strptime(
                         invoice_data.get('due_date'), '%Y-%m-%d'
                     ).date()
+                    logger.debug(f"Parsed due date: {invoice.due_date}")
                 except ValueError:
                     logger.error(f"Invalid due date format: {invoice_data.get('due_date')}")
             
@@ -159,37 +163,19 @@ def create_vendor_bill(invoice_id):
             'message': f'Cannot create vendor bill. Invoice status is {invoice.status}'
         }), 400
     
+    # Since we're skipping Zoho integration for now, just mark it as completed
     try:
-        # Get invoice data
-        parsed_data = json.loads(invoice.parsed_data)
-        line_items = [item.to_dict() for item in invoice.line_items]
+        # Update invoice status
+        invoice.status = "completed"
+        invoice.zoho_vendor_bill_id = "TEST-VENDOR-BILL-ID-" + str(invoice.id)
+        db.session.commit()
         
-        # Create vendor bill in Zoho Books
-        result = create_zoho_vendor_bill(invoice, line_items)
-        
-        if result['success']:
-            # Update invoice status
-            invoice.status = "completed"
-            invoice.zoho_vendor_bill_id = result.get('vendor_bill_id')
-            db.session.commit()
-            
-            return jsonify({
-                'success': True,
-                'message': 'Vendor bill created successfully',
-                'vendor_bill_id': result.get('vendor_bill_id'),
-                'invoice_id': invoice.id
-            })
-        else:
-            # Update invoice with error
-            invoice.error_message = result.get('error')
-            db.session.commit()
-            
-            return jsonify({
-                'success': False,
-                'message': 'Error creating vendor bill',
-                'error': result.get('error'),
-                'invoice_id': invoice.id
-            }), 400
+        return jsonify({
+            'success': True,
+            'message': 'OCR testing completed - Zoho integration skipped',
+            'vendor_bill_id': invoice.zoho_vendor_bill_id,
+            'invoice_id': invoice.id
+        })
             
     except Exception as e:
         logger.exception(f"Error creating vendor bill: {str(e)}")
