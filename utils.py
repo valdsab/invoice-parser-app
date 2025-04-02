@@ -65,6 +65,13 @@ def parse_invoice_with_eyelevel(file_path):
         try:
             bucket_response = client.buckets.create(name="invoice_docs")
             bucket_id = bucket_response.bucket.bucket_id
+            
+            # Clean up bucket_id - convert to string and strip whitespace
+            if isinstance(bucket_id, bytes):
+                bucket_id = bucket_id.decode().strip()
+            else:
+                bucket_id = str(bucket_id).strip()
+                
             logger.debug(f"Created new bucket: {bucket_id}")
         except Exception as bucket_error:
             # Bucket might already exist, try to get existing buckets
@@ -72,7 +79,15 @@ def parse_invoice_with_eyelevel(file_path):
             buckets_response = client.buckets.list()
             if not buckets_response.buckets:
                 raise Exception("Failed to create or find any buckets")
+                
             bucket_id = buckets_response.buckets[0].bucket_id
+            
+            # Clean up bucket_id - convert to string and strip whitespace
+            if isinstance(bucket_id, bytes):
+                bucket_id = bucket_id.decode().strip()
+            else:
+                bucket_id = str(bucket_id).strip()
+                
             logger.debug(f"Using existing bucket: {bucket_id}")
         
         # Upload file
@@ -90,6 +105,13 @@ def parse_invoice_with_eyelevel(file_path):
         
         # Wait for processing
         process_id = upload_response.ingest.process_id
+        
+        # Clean up process_id - convert to string and strip whitespace
+        if isinstance(process_id, bytes):
+            process_id = process_id.decode().strip()
+        else:
+            process_id = str(process_id).strip()
+            
         logger.debug(f"Document uploaded. Process ID: {process_id}")
         
         logger.debug("Waiting for document processing to complete...")
@@ -124,6 +146,12 @@ def parse_invoice_with_eyelevel(file_path):
             time.sleep(3)
         
         # Fetch parsed document
+        # Ensure bucket_id is properly formatted before lookup
+        if isinstance(bucket_id, bytes):
+            bucket_id = bucket_id.decode().strip()
+        else:
+            bucket_id = str(bucket_id).strip()
+            
         document_response = client.documents.lookup(id=bucket_id)
         if not document_response.documents:
             raise Exception("No documents found in bucket after processing")
