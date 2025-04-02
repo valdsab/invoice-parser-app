@@ -245,86 +245,130 @@ def transform_xray_to_invoice_format(xray_data, file_name):
         "date": "",
         "due_date": "",
         "total_amount": "0",
-        "line_items": []
+        "line_items": [],
+        "file_keywords": xray_data.get("fileKeywords", ""),
+        "file_summary": xray_data.get("fileSummary", "")
     }
     
     try:
-        # Extract data from document pages and chunks
-        if "documentPages" not in xray_data:
+        # Extract main invoice metadata first
+        pages = xray_data.get("documentPages", [])
+        if not pages:
             logger.warning("No document pages found in X-Ray data")
             return transformed_data
-        
-        # Extract fields from chunks
-        for page in xray_data["documentPages"]:
-            if "chunks" not in page:
-                continue
-                
-            for chunk in page["chunks"]:
+            
+        # Process each page for invoice metadata and line items
+        for page in pages:
+            # Extract invoice metadata from chunks
+            for chunk in page.get("chunks", []):
                 chunk_type = chunk.get("chunkType", "").lower()
-                text = chunk.get("content", {}).get("text", "")
+                content_type = chunk.get("contentType", [])
+                text = chunk.get("text", "")  # Direct text access
                 
-                # Extract vendor information
-                if chunk_type == "vendor" or "vendor" in chunk_type:
+                # If no direct text, look in content
+                if not text and "content" in chunk and "text" in chunk["content"]:
+                    text = chunk["content"]["text"]
+                
+                # Extract metadata based on chunk type
+                if any(vendor_type in chunk_type for vendor_type in ["vendor", "supplier", "seller"]):
                     transformed_data["vendor"]["name"] = text
                 
-                # Extract invoice number
-                elif chunk_type == "invoice number" or "invoice number" in chunk_type:
+                elif any(inv_num in chunk_type for inv_num in ["invoice number", "invoice #", "bill number"]):
                     transformed_data["invoice_number"] = text
                 
-                # Extract invoice date
-                elif chunk_type == "invoice date" or chunk_type == "date":
+                elif any(date_type in chunk_type for date_type in ["invoice date", "date", "issue date"]):
                     transformed_data["date"] = text
                 
-                # Extract due date
-                elif chunk_type == "due date":
+                elif any(due_type in chunk_type for due_type in ["due date", "payment due"]):
                     transformed_data["due_date"] = text
                 
-                # Extract total amount
-                elif "total" in chunk_type and ("amount" in chunk_type or "cost" in chunk_type):
+                elif any(total in chunk_type for total in ["total", "amount due", "balance due", "grand total"]):
                     # Remove any non-numeric characters except decimal point
                     amount = ''.join(c for c in text if c.isdigit() or c == '.')
-                    transformed_data["total_amount"] = amount
+                    if amount:
+                        transformed_data["total_amount"] = amount
+                        
+                # Extract line items from tables
+                if "table" in content_type:
+                    # Process structured table data if available
+                    if "json" in chunk:
+                        for row in chunk["json"]:
+                            # Normalize field names (case-insensitive)
+                            normalized_row = {k.lower(): v for k, v in row.items()}
+                            
+                            # Extract line item fields with multiple possible key names
+                            line_item = {
+                                "description": get_first_value(normalized_row, ["description", "item", "service", "product"]),
+                                "project_number": get_first_value(normalized_row, ["project number", "project #", "project", "job number", "job #"]),
+                                "project_name": get_first_value(normalized_row, ["project name", "job name", "job"]),
+                                "activity_code": get_first_value(normalized_row, ["activity code", "code", "activity", "task code"]),
+                                "quantity": get_first_value(normalized_row, ["quantity", "qty", "units", "hours"]) or "1",
+                                "unit_price": get_first_value(normalized_row, ["unit price", "rate", "unit cost", "price", "cost"]) or "0",
+                                "amount": get_first_value(normalized_row, ["amount", "total", "line total", "extended", "subtotal"]) or "0",
+                                "tax": get_first_value(normalized_row, ["tax", "vat", "gst", "sales tax"]) or "0"
+                            }
+                            
+                            # Ensure numeric fields are strings for consistent handling
+                            for field in ["quantity", "unit_price", "amount", "tax"]:
+                                if line_item[field] is not None and not isinstance(line_item[field], str):
+                                    line_item[field] = str(line_item[field])
+                            
+                            transformed_data["line_items"].append(line_item)
                 
-                # Extract line items
-                elif chunk_type == "line item" or "item" in chunk_type:
-                    # Basic line item with description only
+                # Fallback to semi-structured or narrative content for line items
+                elif any(item_type in chunk_type for item_type in ["line item", "service item", "product item"]):
+                    # Use narrative or text content if available
+                    description = text
+                    
+                    # Extract potential project number using regex
+                    project_number = extract_from_desc(description, r'(?:Project|PN|Job)\s*(?:Number|#|No\.?|ID)?\s*[:=\s]\s*([A-Z0-9-]+)')
+                    
+                    # Extract activity code using regex
+                    activity_code = extract_from_desc(description, r'(?:Activity|Task)\s*(?:Code|#|No\.?)?\s*[:=\s]\s*([A-Z0-9-]+)')
+                    
+                    # Create line item with available information
                     line_item = {
-                        "description": text,
-                        "quantity": "1",
+                        "description": description,
+                        "project_number": project_number or "",
+                        "project_name": "",  # Often not available in narrative form
+                        "activity_code": activity_code or "",
+                        "quantity": "1",  # Default values
                         "unit_price": "0",
                         "amount": "0",
                         "tax": "0"
                     }
                     
-                    # Try to extract more detailed line item information
-                    if "lineItems" in chunk.get("content", {}):
-                        for line_details in chunk["content"]["lineItems"]:
-                            if "quantity" in line_details:
-                                line_item["quantity"] = str(line_details["quantity"])
-                            if "unitPrice" in line_details:
-                                line_item["unit_price"] = str(line_details["unitPrice"])
-                            if "amount" in line_details:
-                                line_item["amount"] = str(line_details["amount"])
-                            if "tax" in line_details:
-                                line_item["tax"] = str(line_details["tax"])
+                    # Try to extract detailed line item fields if available
+                    if "details" in chunk:
+                        details = chunk["details"]
+                        if "quantity" in details:
+                            line_item["quantity"] = str(details["quantity"])
+                        if "unitPrice" in details or "rate" in details:
+                            line_item["unit_price"] = str(details.get("unitPrice") or details.get("rate", 0))
+                        if "amount" in details or "total" in details:
+                            line_item["amount"] = str(details.get("amount") or details.get("total", 0))
+                        if "tax" in details:
+                            line_item["tax"] = str(details["tax"])
                     
                     transformed_data["line_items"].append(line_item)
         
-        # If we couldn't extract any line items but have tables, try to extract from tables
-        if not transformed_data["line_items"] and "tables" in xray_data:
-            for table in xray_data["tables"]:
-                # Skip header row
-                for row in table.get("rows", [])[1:]:
-                    # Basic extraction assuming common table structure
-                    if len(row) >= 4:  # At least description, quantity, price, amount
-                        line_item = {
-                            "description": row[0] if row[0] else "Unlabeled item",
-                            "quantity": row[1] if len(row) > 1 else "1",
-                            "unit_price": row[2] if len(row) > 2 else "0",
-                            "amount": row[3] if len(row) > 3 else "0",
-                            "tax": row[4] if len(row) > 4 else "0",
-                        }
-                        transformed_data["line_items"].append(line_item)
+        # Fallback for vendor name if not found
+        if not transformed_data["vendor"]["name"]:
+            # Try to extract from file_summary or use filename
+            if transformed_data["file_summary"]:
+                # Look for vendor/supplier mentions in summary
+                vendor_match = re.search(r'(?:from|by|vendor|supplier)[\s:]+([A-Za-z0-9\s&.,]+?)(?:to|for|invoice|on|dated)', 
+                                        transformed_data["file_summary"], re.IGNORECASE)
+                if vendor_match:
+                    transformed_data["vendor"]["name"] = vendor_match.group(1).strip()
+                else:
+                    # Just use the first part of summary as it often starts with vendor name
+                    transformed_data["vendor"]["name"] = transformed_data["file_summary"].split(",")[0].strip()
+            else:
+                # Extract potential vendor name from filename
+                filename_parts = os.path.splitext(file_name)[0].split('_')
+                if len(filename_parts) > 1:
+                    transformed_data["vendor"]["name"] = filename_parts[0].replace('-', ' ').title()
         
         # If we still don't have an invoice number, use the filename
         if not transformed_data["invoice_number"]:
@@ -352,6 +396,22 @@ def transform_xray_to_invoice_format(xray_data, file_name):
                 }
             ]
         }
+
+def get_first_value(data_dict, possible_keys):
+    """
+    Get the first non-empty value from a dictionary using a list of possible keys
+    
+    Args:
+        data_dict: Dictionary to search in
+        possible_keys: List of possible keys to try in order
+        
+    Returns:
+        The first non-empty value found or None if no matches
+    """
+    for key in possible_keys:
+        if key in data_dict and data_dict[key]:
+            return data_dict[key]
+    return None
 
 def create_zoho_vendor_bill(invoice, line_items):
     """
