@@ -3,7 +3,16 @@ import json
 import logging
 import requests
 import re
+import time
+import urllib.request
+import httpx
 from app import app
+
+# Import GroundX SDK here so it's available throughout the module
+try:
+    from groundx import GroundX, Document
+except ImportError:
+    logging.error("GroundX SDK not found. Please install it with 'pip install groundx'.")
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +63,6 @@ def parse_invoice_with_eyelevel(file_path):
     Returns:
         dict: Result with parsed data or error message
     """
-    from groundx import GroundX, Document
-    import urllib.request
-    import time
-    import os
     
     try:
         # Check if the file exists
@@ -91,7 +96,29 @@ def parse_invoice_with_eyelevel(file_path):
         file_extension = os.path.splitext(file_name)[1].lower().replace('.', '')
         
         # Initialize the GroundX client
-        client = GroundX(api_key=api_key)
+        # We'll need to patch the underlying HTTP client to handle header values properly
+        
+        # Create a custom HTTP transport with middleware for header sanitization
+        class HeaderSanitizingTransport(httpx.HTTPTransport):
+            def handle_request(self, request):
+                # Sanitize all header values before sending
+                for name, value in list(request.headers.items()):
+                    if isinstance(value, bytes):
+                        # Replace with clean string value
+                        clean_value = value.decode('utf-8', errors='ignore').strip()
+                        clean_value = re.sub(r'\s+', '', clean_value)
+                        request.headers[name] = clean_value
+                    elif isinstance(value, str) and re.search(r'\s', value):
+                        # Clean any strings with whitespace
+                        clean_value = re.sub(r'\s+', '', value)
+                        request.headers[name] = clean_value
+                        
+                return super().handle_request(request)
+
+        # Create a client with our custom transport
+        httpx_client = httpx.Client(transport=HeaderSanitizingTransport())
+        client = GroundX(api_key=api_key, httpx_client=httpx_client)
+        logger.debug("Initialized GroundX client with custom header sanitization")
         
         # Create or use existing bucket
         try:
