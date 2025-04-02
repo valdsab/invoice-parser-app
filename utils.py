@@ -14,7 +14,7 @@ def allowed_file(filename):
 
 def parse_invoice_with_eyelevel(file_path):
     """
-    Simulated invoice parsing function (replaces actual Eyelevel.ai API call)
+    Parse invoice using the Eyelevel.ai API
     
     Args:
         file_path: Path to the invoice file
@@ -38,46 +38,52 @@ def parse_invoice_with_eyelevel(file_path):
                 'error': "Empty file"
             }
         
-        logger.debug("Using simulated OCR response for testing")
+        # Get the API key from environment variables
+        api_key = os.environ.get('EYELEVEL_API_KEY')
+        if not api_key:
+            logger.error("EYELEVEL_API_KEY environment variable is not set")
+            return {
+                'success': False,
+                'error': "API key not configured. Please set the EYELEVEL_API_KEY environment variable."
+            }
         
-        # Generate a simulated response based on the file
-        filename = os.path.basename(file_path)
-        logger.debug(f"Generating simulated OCR response for {filename}")
+        logger.debug(f"Parsing invoice with Eyelevel.ai API: {file_path}")
         
-        # Create a simulated response
-        response_data = {
-            "vendor": {
-                "name": "ACME Corporation",
-                "address": "123 Business St, Suite 100, San Francisco, CA 94107",
-                "phone": "555-123-4567",
-                "email": "billing@acmecorp.com"
-            },
-            "invoice_number": f"INV-{filename.split('.')[0][-4:]}",
-            "date": "2025-03-15",
-            "due_date": "2025-04-15",
-            "total_amount": "1250.00",
-            "line_items": [
-                {
-                    "description": "Web Development Services PN: 10002",
-                    "quantity": "25",
-                    "unit_price": "50.00",
-                    "amount": "1250.00",
-                    "tax": "0.00",
-                    "project_name": "Site C"
+        # Prepare the file for upload
+        with open(file_path, 'rb') as file:
+            files = {'document': file}
+            
+            # Set up the API endpoint and headers
+            url = "https://api.eyelevel.ai/v1/invoice/parse"
+            headers = {
+                "Authorization": f"Bearer {api_key}"
+            }
+            
+            logger.debug(f"Sending invoice to Eyelevel.ai API")
+            
+            # Make the API request
+            response = requests.post(url, headers=headers, files=files)
+            
+            # Check for successful response
+            if response.status_code == 200:
+                response_data = response.json()
+                logger.debug(f"Eyelevel.ai API response: {json.dumps(response_data, indent=2)}")
+                
+                # Use the normalize_invoice function to standardize data across different vendors
+                invoice_data = normalize_invoice(response_data)
+                
+                logger.debug(f"Normalized invoice data: {json.dumps(invoice_data, indent=2)}")
+                return {
+                    'success': True,
+                    'data': invoice_data
                 }
-            ]
-        }
-        
-        logger.debug(f"Generated simulated OCR response: {json.dumps(response_data, indent=2)}")
-        
-        # Use the normalize_invoice function to standardize data across different vendors
-        invoice_data = normalize_invoice(response_data)
-        
-        logger.debug(f"Normalized invoice data: {json.dumps(invoice_data, indent=2)}")
-        return {
-            'success': True,
-            'data': invoice_data
-        }
+            else:
+                error_message = f"Eyelevel.ai API error: {response.status_code} - {response.text}"
+                logger.error(error_message)
+                return {
+                    'success': False, 
+                    'error': error_message
+                }
         
     except Exception as e:
         logger.exception(f"Error parsing invoice with Eyelevel: {str(e)}")
