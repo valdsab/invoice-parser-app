@@ -7,6 +7,24 @@ from app import app
 
 logger = logging.getLogger(__name__)
 
+def clean_id(id_value):
+    """
+    Clean an ID value to ensure it's a proper string with no whitespace or byte prefixes.
+    This prevents HTTP header errors when using IDs in API requests.
+    
+    Args:
+        id_value: The ID value to clean (can be bytes, str, or other)
+        
+    Returns:
+        str: A clean string representation of the ID
+    """
+    # Convert to string if it's bytes
+    if isinstance(id_value, bytes):
+        id_value = id_value.decode('utf-8', errors='ignore')
+    
+    # Convert to string if it's not already and strip whitespace
+    return str(id_value).strip()
+
 def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and \
@@ -64,13 +82,7 @@ def parse_invoice_with_eyelevel(file_path):
         # Create or use existing bucket
         try:
             bucket_response = client.buckets.create(name="invoice_docs")
-            bucket_id = bucket_response.bucket.bucket_id
-            
-            # Clean up bucket_id - convert to string and strip whitespace
-            if isinstance(bucket_id, bytes):
-                bucket_id = bucket_id.decode().strip()
-            else:
-                bucket_id = str(bucket_id).strip()
+            bucket_id = clean_id(bucket_response.bucket.bucket_id)
                 
             logger.debug(f"Created new bucket: {bucket_id}")
         except Exception as bucket_error:
@@ -80,13 +92,7 @@ def parse_invoice_with_eyelevel(file_path):
             if not buckets_response.buckets:
                 raise Exception("Failed to create or find any buckets")
                 
-            bucket_id = buckets_response.buckets[0].bucket_id
-            
-            # Clean up bucket_id - convert to string and strip whitespace
-            if isinstance(bucket_id, bytes):
-                bucket_id = bucket_id.decode().strip()
-            else:
-                bucket_id = str(bucket_id).strip()
+            bucket_id = clean_id(buckets_response.buckets[0].bucket_id)
                 
             logger.debug(f"Using existing bucket: {bucket_id}")
         
@@ -104,13 +110,7 @@ def parse_invoice_with_eyelevel(file_path):
         )
         
         # Wait for processing
-        process_id = upload_response.ingest.process_id
-        
-        # Clean up process_id - convert to string and strip whitespace
-        if isinstance(process_id, bytes):
-            process_id = process_id.decode().strip()
-        else:
-            process_id = str(process_id).strip()
+        process_id = clean_id(upload_response.ingest.process_id)
             
         logger.debug(f"Document uploaded. Process ID: {process_id}")
         
@@ -147,10 +147,7 @@ def parse_invoice_with_eyelevel(file_path):
         
         # Fetch parsed document
         # Ensure bucket_id is properly formatted before lookup
-        if isinstance(bucket_id, bytes):
-            bucket_id = bucket_id.decode().strip()
-        else:
-            bucket_id = str(bucket_id).strip()
+        bucket_id = clean_id(bucket_id)
             
         document_response = client.documents.lookup(id=bucket_id)
         if not document_response.documents:
