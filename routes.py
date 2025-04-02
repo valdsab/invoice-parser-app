@@ -189,6 +189,66 @@ def create_vendor_bill(invoice_id):
             'invoice_id': invoice.id
         }), 500
 
+@app.route('/invoices/<int:invoice_id>', methods=['DELETE'])
+def delete_invoice(invoice_id):
+    """Delete an invoice and its line items"""
+    try:
+        invoice = Invoice.query.get_or_404(invoice_id)
+        
+        # Delete related line items first
+        InvoiceLineItem.query.filter_by(invoice_id=invoice_id).delete()
+        
+        # Delete the invoice
+        db.session.delete(invoice)
+        db.session.commit()
+        
+        logger.debug(f"Invoice {invoice_id} deleted successfully")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Invoice {invoice_id} deleted successfully'
+        })
+    except Exception as e:
+        logger.exception(f"Error deleting invoice {invoice_id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error deleting invoice: {str(e)}'
+        }), 500
+
+@app.route('/invoices/delete-multiple', methods=['POST'])
+def delete_multiple_invoices():
+    """Delete multiple invoices"""
+    try:
+        data = request.get_json()
+        invoice_ids = data.get('invoice_ids', [])
+        
+        if not invoice_ids:
+            return jsonify({
+                'success': False,
+                'message': 'No invoice IDs provided'
+            }), 400
+        
+        # Delete related line items first
+        for invoice_id in invoice_ids:
+            InvoiceLineItem.query.filter_by(invoice_id=invoice_id).delete()
+        
+        # Delete the invoices
+        deleted_count = Invoice.query.filter(Invoice.id.in_(invoice_ids)).delete(synchronize_session=False)
+        db.session.commit()
+        
+        logger.debug(f"Deleted {deleted_count} invoices: {invoice_ids}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'{deleted_count} invoices deleted successfully'
+        })
+    except Exception as e:
+        logger.exception(f"Error deleting multiple invoices: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error deleting invoices: {str(e)}'
+        }), 500
+
 @app.route('/deluge_script', methods=['GET'])
 def get_deluge_script():
     """Retrieve the Deluge script for Zoho integration"""

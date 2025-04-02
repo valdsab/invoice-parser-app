@@ -292,10 +292,68 @@ document.addEventListener('DOMContentLoaded', function() {
                     // Hide no invoices message
                     noInvoicesMessage.classList.add('d-none');
                     
+                    // Show delete selected button
+                    if (!document.getElementById('delete-selected-btn')) {
+                        // Create delete selected button
+                        const deleteBtn = document.createElement('button');
+                        deleteBtn.id = 'delete-selected-btn';
+                        deleteBtn.className = 'btn btn-danger mb-3';
+                        deleteBtn.innerHTML = '<i class="fas fa-trash-alt me-2"></i>Delete Selected';
+                        deleteBtn.disabled = true;
+                        deleteBtn.addEventListener('click', deleteSelectedInvoices);
+                        
+                        // Create select all checkbox
+                        const selectAllContainer = document.createElement('div');
+                        selectAllContainer.className = 'd-flex justify-content-between align-items-center mb-2';
+                        
+                        const selectAllLabel = document.createElement('label');
+                        selectAllLabel.className = 'form-check form-check-inline mb-0';
+                        selectAllLabel.innerHTML = `
+                            <input class="form-check-input" type="checkbox" id="select-all-invoices">
+                            <span class="form-check-label">Select All</span>
+                        `;
+                        
+                        selectAllContainer.appendChild(selectAllLabel);
+                        selectAllContainer.appendChild(deleteBtn);
+                        
+                        // Insert before the table
+                        const tableContainer = document.querySelector('#invoice-history-container .table-responsive');
+                        tableContainer.parentNode.insertBefore(selectAllContainer, tableContainer);
+                        
+                        // Add event listener to select all checkbox
+                        document.getElementById('select-all-invoices').addEventListener('change', function() {
+                            const checkboxes = document.querySelectorAll('.invoice-select');
+                            checkboxes.forEach(checkbox => {
+                                checkbox.checked = this.checked;
+                            });
+                            updateDeleteButtonState();
+                        });
+                    }
+                    
+                    // Add table header with checkbox column
+                    const headerRow = document.createElement('tr');
+                    headerRow.innerHTML = `
+                        <th><div class="form-check"></div></th>
+                        <th>ID</th>
+                        <th>File Name</th>
+                        <th>Vendor</th>
+                        <th>Invoice #</th>
+                        <th>Date</th>
+                        <th>Amount</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    `;
+                    invoiceHistoryTable.appendChild(headerRow);
+                    
                     // Add each invoice to the table
                     invoices.forEach(invoice => {
                         const row = document.createElement('tr');
                         row.innerHTML = `
+                            <td>
+                                <div class="form-check">
+                                    <input class="form-check-input invoice-select" type="checkbox" data-invoice-id="${invoice.id}">
+                                </div>
+                            </td>
                             <td>${invoice.id}</td>
                             <td>${invoice.file_name}</td>
                             <td>${invoice.vendor_name || 'N/A'}</td>
@@ -304,14 +362,17 @@ document.addEventListener('DOMContentLoaded', function() {
                             <td>${formatCurrency(invoice.total_amount)}</td>
                             <td>${formatStatus(invoice.status)}</td>
                             <td>
-                                <button class="btn btn-sm btn-primary view-invoice-btn" data-invoice-id="${invoice.id}">
+                                <button class="btn btn-sm btn-primary view-invoice-btn" data-invoice-id="${invoice.id}" title="View Details">
                                     <i class="fas fa-eye"></i>
                                 </button>
                                 ${invoice.status === 'parsed' ? `
-                                <button class="btn btn-sm btn-success create-bill-btn" data-invoice-id="${invoice.id}">
+                                <button class="btn btn-sm btn-success create-bill-btn" data-invoice-id="${invoice.id}" title="Create Vendor Bill">
                                     <i class="fas fa-file-invoice-dollar"></i>
                                 </button>
                                 ` : ''}
+                                <button class="btn btn-sm btn-danger delete-invoice-btn" data-invoice-id="${invoice.id}" title="Delete">
+                                    <i class="fas fa-trash-alt"></i>
+                                </button>
                             </td>
                         `;
                         invoiceHistoryTable.appendChild(row);
@@ -332,21 +393,138 @@ document.addEventListener('DOMContentLoaded', function() {
                             createVendorBill();
                         });
                     });
+                    
+                    document.querySelectorAll('.delete-invoice-btn').forEach(btn => {
+                        btn.addEventListener('click', function() {
+                            const invoiceId = this.getAttribute('data-invoice-id');
+                            deleteInvoice(invoiceId);
+                        });
+                    });
+                    
+                    // Add event listeners to checkboxes
+                    document.querySelectorAll('.invoice-select').forEach(checkbox => {
+                        checkbox.addEventListener('change', updateDeleteButtonState);
+                    });
                 } else {
                     // Show no invoices message
                     noInvoicesMessage.classList.remove('d-none');
+                    
+                    // Remove delete selected button if it exists
+                    const deleteBtn = document.getElementById('delete-selected-btn');
+                    const selectAllContainer = deleteBtn?.parentNode;
+                    if (selectAllContainer) {
+                        selectAllContainer.remove();
+                    }
                 }
             })
             .catch(error => {
                 console.error('Error loading invoice history:', error);
                 invoiceHistoryTable.innerHTML = `
                     <tr>
-                        <td colspan="8" class="text-center text-danger">
+                        <td colspan="9" class="text-center text-danger">
                             Error loading invoice history: ${error.message}
                         </td>
                     </tr>
                 `;
             });
+    }
+    
+    /**
+     * Update delete button state based on checkbox selection
+     */
+    function updateDeleteButtonState() {
+        const deleteBtn = document.getElementById('delete-selected-btn');
+        if (deleteBtn) {
+            const checkedBoxes = document.querySelectorAll('.invoice-select:checked');
+            deleteBtn.disabled = checkedBoxes.length === 0;
+            
+            // Update select all checkbox
+            const selectAllCheckbox = document.getElementById('select-all-invoices');
+            const allCheckboxes = document.querySelectorAll('.invoice-select');
+            if (selectAllCheckbox && allCheckboxes.length > 0) {
+                selectAllCheckbox.checked = checkedBoxes.length === allCheckboxes.length;
+                selectAllCheckbox.indeterminate = checkedBoxes.length > 0 && checkedBoxes.length < allCheckboxes.length;
+            }
+        }
+    }
+    
+    /**
+     * Delete a single invoice
+     */
+    function deleteInvoice(invoiceId) {
+        if (confirm(`Are you sure you want to delete invoice #${invoiceId}? This action cannot be undone.`)) {
+            fetch(`/invoices/${invoiceId}`, {
+                method: 'DELETE'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('success', data.message);
+                    
+                    // Reload invoice history
+                    loadInvoiceHistory();
+                    
+                    // If the deleted invoice is the current one, reset the UI
+                    if (currentInvoiceId === invoiceId) {
+                        resetProcessingUI();
+                        invoiceDetailsContainer.classList.add('d-none');
+                        currentInvoiceId = null;
+                    }
+                } else {
+                    showStatus('error', data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showStatus('error', `An error occurred: ${error.message}`);
+            });
+        }
+    }
+    
+    /**
+     * Delete multiple selected invoices
+     */
+    function deleteSelectedInvoices() {
+        const checkedBoxes = document.querySelectorAll('.invoice-select:checked');
+        const invoiceIds = Array.from(checkedBoxes).map(checkbox => 
+            parseInt(checkbox.getAttribute('data-invoice-id'))
+        );
+        
+        if (invoiceIds.length === 0) {
+            return;
+        }
+        
+        if (confirm(`Are you sure you want to delete ${invoiceIds.length} selected invoice(s)? This action cannot be undone.`)) {
+            fetch('/invoices/delete-multiple', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ invoice_ids: invoiceIds })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showStatus('success', data.message);
+                    
+                    // Reload invoice history
+                    loadInvoiceHistory();
+                    
+                    // If the current invoice is among the deleted ones, reset the UI
+                    if (currentInvoiceId && invoiceIds.includes(parseInt(currentInvoiceId))) {
+                        resetProcessingUI();
+                        invoiceDetailsContainer.classList.add('d-none');
+                        currentInvoiceId = null;
+                    }
+                } else {
+                    showStatus('error', data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showStatus('error', `An error occurred: ${error.message}`);
+            });
+        }
     }
     
     /**
