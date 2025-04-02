@@ -34,9 +34,13 @@ def parse_invoice_with_eyelevel(file_path):
         # API endpoint for document parsing - using Eyelevel OCR API
         url = "https://api.eyelevel.ai/v1/document/parse"
         
+        # The API expects a specific authorization format
+        # Based on the error message, it seems the API expects a key=value format
         headers = {
-            "Authorization": f"Bearer {api_key}"
+            "Authorization": f"Key={api_key}"
         }
+        
+        logger.debug("Using Eyelevel.ai API with authentication header format: Key=***")
         
         logger.debug(f"Sending file {file_path} to Eyelevel.ai API")
         
