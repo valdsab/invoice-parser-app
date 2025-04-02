@@ -317,7 +317,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         selectAllContainer.appendChild(deleteBtn);
                         
                         // Insert before the table
-                        const tableContainer = document.querySelector('#invoice-history-container .table-responsive');
+                        const tableContainer = document.querySelector('#invoice-history .table-responsive');
                         tableContainer.parentNode.insertBefore(selectAllContainer, tableContainer);
                         
                         // Add event listener to select all checkbox
