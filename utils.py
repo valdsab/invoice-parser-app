@@ -31,16 +31,15 @@ def parse_invoice_with_eyelevel(file_path):
                 'error': 'Eyelevel API key not configured'
             }
         
-        # API endpoint for document parsing - using Eyelevel OCR API
-        url = "https://api.eyelevel.ai/v1/document/parse"
+        # API endpoint for invoice parsing - using Eyelevel OCR API
+        url = "https://api.eyelevel.ai/v1/invoice/parse"
         
-        # Based on error messages, Eyelevel API requires a key=value pair format
-        # The error mentions SHA-256 and Base64 encoding
+        # Using Bearer token format as per the Node.js example
         headers = {
-            "Authorization": f"ApiKey={api_key}"
+            "Authorization": f"Bearer {api_key}"
         }
         
-        logger.debug("Using Eyelevel.ai API with authentication header format: ApiKey=***")
+        logger.debug("Using Eyelevel.ai API with authentication header format: Bearer ***")
         
         logger.debug(f"Sending file {file_path} to Eyelevel.ai API")
         
