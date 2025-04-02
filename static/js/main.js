@@ -156,6 +156,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         const row = document.createElement('tr');
                         row.innerHTML = `
                             <td>${item.description || 'N/A'}</td>
+                            <td>${item.project_number || 'N/A'}</td>
+                            <td>${item.project_name || 'N/A'}</td>
+                            <td>${item.activity_code || 'N/A'}</td>
                             <td>${item.quantity || '1'}</td>
                             <td>${formatCurrency(item.unit_price) || 'N/A'}</td>
                             <td>${formatCurrency(item.amount) || 'N/A'}</td>
@@ -166,7 +169,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 } else {
                     // No line items
                     const row = document.createElement('tr');
-                    row.innerHTML = '<td colspan="5" class="text-center">No line items found</td>';
+                    row.innerHTML = '<td colspan="8" class="text-center">No line items found</td>';
                     lineItemsTable.appendChild(row);
                 }
                 
@@ -225,7 +228,7 @@ document.addEventListener('DOMContentLoaded', function() {
             .catch(error => {
                 console.error('Error fetching line items:', error);
                 const row = document.createElement('tr');
-                row.innerHTML = '<td colspan="5" class="text-center text-danger">Error loading line items</td>';
+                row.innerHTML = '<td colspan="8" class="text-center text-danger">Error loading line items</td>';
                 lineItemsTable.appendChild(row);
             });
     }

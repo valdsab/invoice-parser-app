@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import requests
+import re
 from app import app
 
 logger = logging.getLogger(__name__)
@@ -57,40 +58,22 @@ def parse_invoice_with_eyelevel(file_path):
             "total_amount": "1250.00",
             "line_items": [
                 {
-                    "description": "Web Development Services",
+                    "description": "Web Development Services PN: 10002",
                     "quantity": "25",
                     "unit_price": "50.00",
                     "amount": "1250.00",
-                    "tax": "0.00"
+                    "tax": "0.00",
+                    "project_name": "Site C"
                 }
             ]
         }
         
         logger.debug(f"Generated simulated OCR response: {json.dumps(response_data, indent=2)}")
         
-        # Extract relevant invoice data
-        invoice_data = {
-            'vendor_name': response_data.get('vendor', {}).get('name'),
-            'invoice_number': response_data.get('invoice_number'),
-            'invoice_date': response_data.get('date'),
-            'due_date': response_data.get('due_date'),
-            'total_amount': float(response_data.get('total_amount', 0)),
-            'line_items': [],
-            'raw_response': response_data  # Include the full response for debugging
-        }
+        # Use the normalize_invoice function to standardize data across different vendors
+        invoice_data = normalize_invoice(response_data)
         
-        # Extract line items
-        for item in response_data.get('line_items', []):
-            line_item = {
-                'description': item.get('description'),
-                'quantity': float(item.get('quantity', 1)),
-                'unit_price': float(item.get('unit_price', 0)),
-                'amount': float(item.get('amount', 0)),
-                'tax': float(item.get('tax', 0))
-            }
-            invoice_data['line_items'].append(line_item)
-        
-        logger.debug(f"Extracted invoice data: {json.dumps(invoice_data, indent=2)}")
+        logger.debug(f"Normalized invoice data: {json.dumps(invoice_data, indent=2)}")
         return {
             'success': True,
             'data': invoice_data
@@ -102,6 +85,69 @@ def parse_invoice_with_eyelevel(file_path):
             'success': False,
             'error': str(e)
         }
+
+def extract_from_desc(description, pattern):
+    """
+    Extract information from description using regex pattern
+    
+    Args:
+        description: Text to search in
+        pattern: Regex pattern to use for extraction
+        
+    Returns:
+        str: Extracted value or None
+    """
+    if not description:
+        return None
+    
+    match = re.search(pattern, description)
+    return match.group(1) if match else None
+
+def normalize_invoice(eyelevel_data):
+    """
+    Normalize invoice data from Eyelevel.ai response
+    
+    Args:
+        eyelevel_data: Raw response data from Eyelevel.ai
+        
+    Returns:
+        dict: Normalized invoice data with consistent fields
+    """
+    # Safe access helper function
+    def safe(v):
+        return v if v is not None else None
+    
+    # Create base invoice object with normalized fields
+    invoice = {
+        'vendor_name': safe(eyelevel_data.get('vendor', {}).get('name')),
+        'invoice_number': safe(eyelevel_data.get('invoice_number')),
+        'invoice_date': safe(eyelevel_data.get('date')),
+        'due_date': safe(eyelevel_data.get('due_date')),
+        'total_amount': float(eyelevel_data.get('total_amount', 0) or 0),
+        'line_items': [],
+        'raw_response': eyelevel_data  # Keep the raw response for debugging
+    }
+    
+    # Process line items with consistent field structure
+    if eyelevel_data.get('line_items') and isinstance(eyelevel_data['line_items'], list):
+        for item in eyelevel_data['line_items']:
+            description = item.get('description') or ''
+            
+            line_item = {
+                'description': description,
+                'project_number': item.get('project_number') or extract_from_desc(description, r'PN:?\s*(\d+)'),
+                'project_name': item.get('project_name') or '',
+                'activity_code': item.get('activity_code') or '',
+                'quantity': float(item.get('quantity', 1) or 1),
+                'unit_price': float(item.get('unit_price', 0) or 0),
+                'amount': float(item.get('amount', 0) or 0),
+                'tax': float(item.get('tax', 0) or 0)
+            }
+            
+            invoice['line_items'].append(line_item)
+    
+    logger.debug(f"Normalized invoice data: {json.dumps(invoice, indent=2)}")
+    return invoice
 
 def create_zoho_vendor_bill(invoice, line_items):
     """

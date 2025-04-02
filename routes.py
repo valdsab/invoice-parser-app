@@ -98,7 +98,10 @@ def upload_invoice():
                     quantity=item_data.get('quantity'),
                     unit_price=item_data.get('unit_price'),
                     amount=item_data.get('amount'),
-                    tax=item_data.get('tax', 0)
+                    tax=item_data.get('tax', 0),
+                    project_number=item_data.get('project_number'),
+                    project_name=item_data.get('project_name'),
+                    activity_code=item_data.get('activity_code')
                 )
                 db.session.add(line_item)
             

@@ -42,6 +42,9 @@ class InvoiceLineItem(db.Model):
     unit_price = db.Column(db.Float)
     amount = db.Column(db.Float)
     tax = db.Column(db.Float)
+    project_number = db.Column(db.String(100))
+    project_name = db.Column(db.String(255)) 
+    activity_code = db.Column(db.String(100))
     created_at = db.Column(db.DateTime, default=datetime.datetime.utcnow)
 
     invoice = db.relationship('Invoice', backref=db.backref('line_items', lazy=True))
@@ -54,5 +57,8 @@ class InvoiceLineItem(db.Model):
             'quantity': self.quantity,
             'unit_price': self.unit_price,
             'amount': self.amount,
-            'tax': self.tax
+            'tax': self.tax,
+            'project_number': self.project_number,
+            'project_name': self.project_name,
+            'activity_code': self.activity_code
         }
