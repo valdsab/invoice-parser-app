@@ -34,9 +34,9 @@ def parse_invoice_with_eyelevel(file_path):
         # API endpoint for invoice parsing - using Eyelevel OCR API
         url = "https://api.eyelevel.ai/v1/invoice/parse"
         
-        # Using Bearer token format as per the Node.js example
+        # Using the exact format provided by the user
         headers = {
-            "Authorization": f"Bearer {api_key}"
+            "Authorization": 'Bearer TQFoWGlLy9zfm+fLuQj9cdE4yHRkp+gml11qNivBsnQ='
         }
         
         logger.debug("Using Eyelevel.ai API with authentication header format: Bearer ***")
