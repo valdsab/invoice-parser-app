@@ -28,7 +28,7 @@ ENV/
 *.db
 *.sqlite3
 *.sqlite
-instance/
+instance/**/*
 
 # Flask
 instance/
