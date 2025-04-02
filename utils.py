@@ -22,8 +22,22 @@ def clean_id(id_value):
     if isinstance(id_value, bytes):
         id_value = id_value.decode('utf-8', errors='ignore')
     
-    # Convert to string if it's not already and strip whitespace
-    return str(id_value).strip()
+    # Convert to string if it's not already, strip whitespace from both ends
+    # and remove any leading/trailing whitespace or special characters
+    cleaned_id = str(id_value).strip()
+    
+    # Remove any spaces or non-visible characters that might be inside the ID
+    cleaned_id = re.sub(r'\s+', '', cleaned_id)
+    
+    # Ensure ID is in standard UUID format if it looks like a UUID
+    if re.match(r'^[0-9a-f-]{36}$', cleaned_id, re.IGNORECASE):
+        # Normalize UUID format (lowercase, properly hyphenated)
+        uuid_parts = cleaned_id.replace('-', '')
+        if len(uuid_parts) == 32:  # Standard UUID length without hyphens
+            cleaned_id = f"{uuid_parts[0:8]}-{uuid_parts[8:12]}-{uuid_parts[12:16]}-{uuid_parts[16:20]}-{uuid_parts[20:32]}"
+    
+    logger.debug(f"Cleaned ID from '{id_value}' to '{cleaned_id}'")
+    return cleaned_id
 
 def allowed_file(filename):
     """Check if file extension is allowed"""
