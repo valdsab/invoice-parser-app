@@ -98,8 +98,7 @@ def parse_invoice_with_eyelevel(file_path):
         # Initialize the GroundX client
         # We'll need to patch the underlying HTTP client to handle header values properly
         import httpx
-        from groundx import GroundX
-        from groundx.models import Document
+        from groundx import GroundX, Document
         
         # Create a custom HTTP transport with middleware for header sanitization
         class HeaderSanitizingTransport(httpx.HTTPTransport):
