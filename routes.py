@@ -138,11 +138,8 @@ def upload_invoice():
                 'normalized': invoice_data
             }
             
-            # Store the appropriate raw data based on source type
-            if data_source_type == "extraction":
-                parsed_data['raw_extraction_data'] = raw_data
-            else:
-                parsed_data['raw_xray'] = raw_data
+            # Store the raw extraction data (always using LlamaCloud now)
+            parsed_data['raw_extraction_data'] = raw_data
             invoice.parsed_data = json.dumps(parsed_data)
             invoice.status = "parsed"
             
@@ -585,112 +582,107 @@ def apply_vendor_mapping_to_invoice(invoice_id, mapping_id):
             try:
                 # Parse the stored data
                 stored_data = json.loads(invoice.parsed_data)
-                raw_xray_data = {}
+                raw_extraction_data = {}
                 
                 # Extract the raw data based on source
                 if isinstance(stored_data, dict):
-                    if 'raw_xray' in stored_data:
-                        raw_xray_data = stored_data.get('raw_xray', {})
-                    # Check for LlamaCloud data as well
-                    elif 'raw_extraction_data' in stored_data:
-                        raw_xray_data = stored_data.get('raw_extraction_data', {})
+                    if 'raw_extraction_data' in stored_data:
+                        raw_extraction_data = stored_data.get('raw_extraction_data', {})
+                    # Legacy format from older version - kept for backward compatibility
+                    elif 'raw_xray' in stored_data:
+                        raw_extraction_data = stored_data.get('raw_xray', {})
                     
                 # Re-normalize the data with the new mapping
-                if raw_xray_data:
-                    # Prepare data for normalization
-                    from utils import transform_llama_cloud_to_invoice_format, normalize_invoice
+                if not raw_extraction_data:
+                    # Skip processing for unsupported or legacy data format
+                    logger.warning(f"Skipping unsupported data format for invoice {invoice_id}")
+                    return jsonify({
+                        'success': False,
+                        'error': 'Unsupported data format cannot be reprocessed'
+                    }), 400
+                
+                # Prepare data for normalization
+                from utils import transform_llama_cloud_to_invoice_format, normalize_invoice
+                
+                # Process data with LlamaCloud - Transform the extraction data
+                transformed_data = transform_llama_cloud_to_invoice_format(raw_extraction_data, invoice.file_name)
+                
+                # Force the vendor name to match our mapping
+                if transformed_data and isinstance(transformed_data, dict) and 'vendor' in transformed_data:
+                    transformed_data['vendor']['name'] = mapping.vendor_name
+                
+                # Normalize the transformed data with the new mapping
+                normalized_data = normalize_invoice(transformed_data)
+                
+                # Update invoice with newly normalized data
+                if normalized_data:
+                    # Update invoice fields
+                    invoice.vendor_name = normalized_data.get('vendor_name')
+                    invoice.invoice_number = normalized_data.get('invoice_number')
                     
-                    # Process data with LlamaCloud
-                    if isinstance(stored_data, dict) and 'raw_extraction_data' in stored_data:
-                        # Data is from LlamaCloud
-                        raw_extraction_data = stored_data.get('raw_extraction_data', {})
-                        transformed_data = transform_llama_cloud_to_invoice_format(raw_extraction_data, invoice.file_name)
-                    else:
-                        # Skip processing for old Eyelevel data
-                        logger.warning(f"Skipping legacy data format for invoice {invoice_id}")
-                        return jsonify({
-                            'success': False,
-                            'error': 'Legacy data format cannot be reprocessed'
-                        }), 400
+                    # Parse dates
+                    invoice_date = normalized_data.get('invoice_date')
+                    if invoice_date and isinstance(invoice_date, str):
+                        try:
+                            invoice.invoice_date = datetime.datetime.strptime(
+                                invoice_date, '%Y-%m-%d'
+                            ).date()
+                        except ValueError:
+                            logger.warning(f"Invalid invoice date format: {invoice_date}")
                     
-                    # Force the vendor name to match our mapping
-                    if transformed_data and isinstance(transformed_data, dict) and 'vendor' in transformed_data:
-                        transformed_data['vendor']['name'] = mapping.vendor_name
+                    due_date = normalized_data.get('due_date')
+                    if due_date and isinstance(due_date, str):
+                        try:
+                            invoice.due_date = datetime.datetime.strptime(
+                                due_date, '%Y-%m-%d'
+                            ).date()
+                        except ValueError:
+                            logger.warning(f"Invalid due date format: {due_date}")
                     
-                    # Normalize the transformed data with the new mapping
-                    normalized_data = normalize_invoice(transformed_data)
+                    invoice.total_amount = normalized_data.get('total_amount')
                     
-                    # Update invoice with newly normalized data
-                    if normalized_data:
-                        # Update invoice fields
-                        invoice.vendor_name = normalized_data.get('vendor_name')
-                        invoice.invoice_number = normalized_data.get('invoice_number')
+                    # Store updated data                 
+                    # Store the updated data
+                    updated_parsed_data = {
+                        'normalized': normalized_data,
+                        'raw_extraction_data': raw_extraction_data
+                    }
+                    invoice.parsed_data = json.dumps(updated_parsed_data)
+                    
+                    # Update line items
+                    # First delete existing line items
+                    InvoiceLineItem.query.filter_by(invoice_id=invoice.id).delete()
+                    
+                    # Then add new ones
+                    line_items = normalized_data.get('line_items', [])
+                    for item_data in line_items:
+                        line_item = InvoiceLineItem(
+                            invoice_id=invoice.id,
+                            description=item_data.get('description'),
+                            quantity=item_data.get('quantity'),
+                            unit_price=item_data.get('unit_price'),
+                            amount=item_data.get('amount'),
+                            tax=item_data.get('tax', 0),
+                            project_number=item_data.get('project_number'),
+                            project_name=item_data.get('project_name'),
+                            activity_code=item_data.get('activity_code')
+                        )
+                        db.session.add(line_item)
+                    
+                    db.session.commit()
+                    
+                    # Always using LlamaCloud now
+                    parser_used = "LlamaCloud"
                         
-                        # Parse dates
-                        invoice_date = normalized_data.get('invoice_date')
-                        if invoice_date and isinstance(invoice_date, str):
-                            try:
-                                invoice.invoice_date = datetime.datetime.strptime(
-                                    invoice_date, '%Y-%m-%d'
-                                ).date()
-                            except ValueError:
-                                logger.warning(f"Invalid invoice date format: {invoice_date}")
-                        
-                        due_date = normalized_data.get('due_date')
-                        if due_date and isinstance(due_date, str):
-                            try:
-                                invoice.due_date = datetime.datetime.strptime(
-                                    due_date, '%Y-%m-%d'
-                                ).date()
-                            except ValueError:
-                                logger.warning(f"Invalid due date format: {due_date}")
-                        
-                        invoice.total_amount = normalized_data.get('total_amount')
-                        
-                        # Store updated data
-                        updated_parsed_data = {}
-                        
-                        # Store the updated data
-                        updated_parsed_data = {
-                            'normalized': normalized_data,
-                            'raw_extraction_data': raw_xray_data
-                        }
-                        invoice.parsed_data = json.dumps(updated_parsed_data)
-                        
-                        # Update line items
-                        # First delete existing line items
-                        InvoiceLineItem.query.filter_by(invoice_id=invoice.id).delete()
-                        
-                        # Then add new ones
-                        line_items = normalized_data.get('line_items', [])
-                        for item_data in line_items:
-                            line_item = InvoiceLineItem(
-                                invoice_id=invoice.id,
-                                description=item_data.get('description'),
-                                quantity=item_data.get('quantity'),
-                                unit_price=item_data.get('unit_price'),
-                                amount=item_data.get('amount'),
-                                tax=item_data.get('tax', 0),
-                                project_number=item_data.get('project_number'),
-                                project_name=item_data.get('project_name'),
-                                activity_code=item_data.get('activity_code')
-                            )
-                            db.session.add(line_item)
-                        
-                        db.session.commit()
-                        
-                        # Always using LlamaCloud now
-                        parser_used = "LlamaCloud"
-                            
-                        logger.info(f"Successfully applied vendor mapping with {parser_used} parser data")
-                        
-                        return jsonify({
-                            'success': True,
-                            'message': f'Vendor mapping for {mapping.vendor_name} applied to invoice {invoice_id}',
-                            'invoice': invoice.to_dict(),
-                            'line_items': [item.to_dict() for item in invoice.line_items],
-                            'parser_used': parser_used
-                        })
+                    logger.info(f"Successfully applied vendor mapping with {parser_used} parser data")
+                    
+                    return jsonify({
+                        'success': True,
+                        'message': f'Vendor mapping for {mapping.vendor_name} applied to invoice {invoice_id}',
+                        'invoice': invoice.to_dict(),
+                        'line_items': [item.to_dict() for item in invoice.line_items],
+                        'parser_used': parser_used
+                    })
             except Exception as parse_error:
                 logger.exception(f"Error reparsing invoice data: {str(parse_error)}")
                 return jsonify({

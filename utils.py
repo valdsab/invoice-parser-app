@@ -192,92 +192,82 @@ def parse_invoice_with_llama_cloud(file_path):
             "Accept": "application/json"
         }
         
-        # Step 1: Upload file to LlamaCloud
-        base_url = "https://api.cloud.llamaindex.ai"  # Updated the base URL with correct domain
-        upload_url = f"{base_url}/api/v1/documents/upload-url"  # Updated to use v1 API path
+        # Step 1: Upload file to LlamaCloud using the API that works in our tests
+        base_url = "https://api.cloud.llamaindex.ai"
+        upload_url = f"{base_url}/api/parsing/upload"
         
-        # Get presigned URL for file upload
-        logger.debug("Requesting presigned URL for file upload")
-        presigned_response = requests.post(
-            upload_url,
-            headers=headers,
-            json={"fileName": file_name},
-            timeout=API_REQUEST_TIMEOUT
-        )
-        presigned_response.raise_for_status()
-        presigned_data = presigned_response.json()
+        logger.debug(f"Uploading file to LlamaCloud: {file_name}")
         
-        upload_data = presigned_data.get("data", {})
-        document_id = upload_data.get("documentId")
-        presigned_url = upload_data.get("uploadUrl")
-        
-        if not presigned_url or not document_id:
-            raise Exception(f"Invalid presigned URL response: {presigned_data}")
-        
-        logger.debug(f"Received presigned URL. Document ID: {document_id}")
-        
-        # Upload the file using the presigned URL
+        # Read the file
         with open(file_path, "rb") as file:
             file_content = file.read()
         
-        logger.debug(f"Uploading file to LlamaCloud: {file_name}")
-        upload_response = requests.put(
-            presigned_url,
-            data=file_content,
-            headers={"Content-Type": "application/octet-stream"},
+        # Determine MIME type based on file extension
+        mime_type = 'application/pdf'
+        if file_extension.lower() in ['.jpg', '.jpeg']:
+            mime_type = 'image/jpeg'
+        elif file_extension.lower() == '.png':
+            mime_type = 'image/png'
+            
+        # Use multipart/form-data upload
+        files = {
+            'file': (file_name, file_content, mime_type)
+        }
+        
+        # Headers for multipart upload - no content-type here, requests will set it
+        upload_headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json"
+        }
+        
+        # Send upload request with files parameter for multipart/form-data
+        upload_response = requests.post(
+            upload_url,
+            headers=upload_headers,
+            files=files,
             timeout=API_REQUEST_TIMEOUT
         )
         upload_response.raise_for_status()
-        logger.debug("File uploaded successfully")
         
-        # Step 2: Process the document for invoice extraction
-        process_url = f"{base_url}/api/v1/documents/{document_id}/process"  # Updated to use v1 API path
-        process_data = {
-            "processors": ["invoice-extraction"]
-        }
+        # Get the job ID
+        upload_data = upload_response.json()
+        job_id = upload_data.get("id")
         
-        logger.debug(f"Requesting invoice extraction for document: {document_id}")
-        process_response = requests.post(
-            process_url,
-            headers=headers,
-            json=process_data,
-            timeout=API_REQUEST_TIMEOUT
-        )
-        process_response.raise_for_status()
-        process_result = process_response.json()
+        if not job_id:
+            raise Exception(f"No job ID returned from upload request: {upload_data}")
         
-        # Get the task ID
-        task_id = process_result.get("data", {}).get("taskId")
-        if not task_id:
-            raise Exception(f"Invalid process response, no task ID: {process_result}")
+        job_status = upload_data.get("status")
+        logger.debug(f"Upload successful. Job ID: {job_id}, Status: {job_status}")
         
-        logger.debug(f"Extraction task created: {task_id}")
-        
-        # Step 3: Poll for task completion
-        task_url = f"{base_url}/api/v1/tasks/{task_id}"  # Updated to use v1 API path
+        # Step 2: Poll for job completion
+        status_url = f"{base_url}/api/parsing/job/{job_id}"
         max_wait_time = MAX_POLLING_TIMEOUT
         poll_interval = 2.0
         start_time = time.time()
         
         logger.debug("Waiting for invoice extraction to complete...")
+        
+        status_data = None
         while time.time() - start_time < max_wait_time:
-            task_response = requests.get(
-                task_url,
-                headers=headers,
+            status_response = requests.get(
+                status_url,
+                headers=upload_headers,  # Use the headers without Content-Type
                 timeout=API_REQUEST_TIMEOUT
             )
-            task_response.raise_for_status()
-            task_data = task_response.json().get("data", {})
-            task_status = task_data.get("status")
+            status_response.raise_for_status()
+            status_data = status_response.json()
             
-            logger.debug(f"Current task status: {task_status}")
+            job_status = status_data.get("status")
+            logger.debug(f"Current job status: {job_status}")
             
-            if task_status == "COMPLETED":
+            # Check if processing is complete
+            if job_status in ["COMPLETE", "SUCCESS", "success"]:
                 logger.debug("Invoice extraction completed successfully")
                 break
-            elif task_status in ("FAILED", "CANCELED"):
-                error_details = task_data.get("errorDetails", "Unknown error")
-                error_msg = f"Invoice extraction failed with status: {task_status}. Error: {error_details}"
+            
+            # Check for error
+            if job_status in ["ERROR", "error", "FAILED", "failed"]:
+                error_msg = f"Invoice extraction failed: {status_data.get('error', 'Unknown error')}"
                 logger.error(error_msg)
                 return {
                     'success': False,
@@ -296,17 +286,11 @@ def parse_invoice_with_llama_cloud(file_path):
                 'error': error_msg
             }
         
-        # Step 4: Get extraction results
-        results_url = f"{base_url}/api/v1/tasks/{task_id}/result"  # Updated to use v1 API path
-        logger.debug(f"Retrieving extraction results for task: {task_id}")
+        # Step 3: Get extraction results (already in status_data)
+        logger.debug("Retrieving extraction results")
         
-        results_response = requests.get(
-            results_url,
-            headers=headers,
-            timeout=API_REQUEST_TIMEOUT
-        )
-        results_response.raise_for_status()
-        extraction_data = results_response.json().get("data", {})
+        # The extraction data is already in the status response
+        extraction_data = status_data
         
         if not extraction_data:
             raise Exception("Empty extraction results received")
@@ -579,19 +563,37 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
     try:
         logger.debug(f"Transforming LlamaCloud extraction data for: {file_name}")
         
-        # Get the invoice extraction results
-        invoice_data = extraction_data.get("invoice", {})
-        if not invoice_data:
-            raise ValueError("No invoice data found in extraction results")
-            
-        # Extract vendor info
-        vendor_name = invoice_data.get("vendor", {}).get("name", "Unknown Vendor")
+        # Get the invoice extraction results - the format is different in our API response
+        # In the parsing API, the invoice data may be at the root level
+        invoice_data = extraction_data
         
-        # Extract invoice metadata
-        invoice_number = invoice_data.get("invoiceNumber", "")
-        invoice_date = invoice_data.get("invoiceDate", "")
-        due_date = invoice_data.get("dueDate", "")
-        total_amount = invoice_data.get("totalAmount", {}).get("amount", 0)
+        # Look for invoice properties in expected locations
+        vendor_info = None
+        vendor_name = "Unknown Vendor"
+        
+        # Try to extract vendor info
+        if "vendor" in invoice_data:
+            vendor_info = invoice_data.get("vendor", {})
+            if isinstance(vendor_info, dict):
+                vendor_name = vendor_info.get("name", "Unknown Vendor")
+            elif isinstance(vendor_info, str):
+                vendor_name = vendor_info
+        
+        # Extract invoice metadata - try different possible field names
+        invoice_number = invoice_data.get("invoiceNumber", invoice_data.get("invoice_number", ""))
+        invoice_date = invoice_data.get("invoiceDate", invoice_data.get("date", ""))
+        due_date = invoice_data.get("dueDate", invoice_data.get("due_date", ""))
+        
+        # Extract total amount - handle different formats
+        total_amount = 0
+        if "totalAmount" in invoice_data:
+            total_info = invoice_data.get("totalAmount", {})
+            if isinstance(total_info, dict) and "amount" in total_info:
+                total_amount = total_info.get("amount", 0)
+            else:
+                total_amount = total_info
+        elif "total" in invoice_data:
+            total_amount = invoice_data.get("total", 0)
         
         # Extract line items
         line_items_data = invoice_data.get("lineItems", [])
@@ -665,170 +667,8 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
         }
 
 
-# This function was used for Eyelevel.ai integration and has been removed as part of
-# transitioning to LlamaCloud-only integration
-    logger.debug("Transforming X-Ray data to invoice format")
-    
-    # Initialize the transformed data structure
-    transformed_data = {
-        "vendor": {
-            "name": ""
-        },
-        "invoice_number": "",
-        "date": "",
-        "due_date": "",
-        "total_amount": "0",
-        "line_items": [],
-        "file_keywords": xray_data.get("fileKeywords", ""),
-        "file_summary": xray_data.get("fileSummary", "")
-    }
-    
-    try:
-        # Extract main invoice metadata first
-        pages = xray_data.get("documentPages", [])
-        if not pages:
-            logger.warning("No document pages found in X-Ray data")
-            return transformed_data
-            
-        # Process each page for invoice metadata and line items
-        for page in pages:
-            # Extract invoice metadata from chunks
-            for chunk in page.get("chunks", []):
-                chunk_type = chunk.get("chunkType", "").lower()
-                content_type = chunk.get("contentType", [])
-                text = chunk.get("text", "")  # Direct text access
-                
-                # If no direct text, look in content
-                if not text and "content" in chunk and "text" in chunk["content"]:
-                    text = chunk["content"]["text"]
-                
-                # Extract metadata based on chunk type
-                if any(vendor_type in chunk_type for vendor_type in ["vendor", "supplier", "seller"]):
-                    transformed_data["vendor"]["name"] = text
-                
-                elif any(inv_num in chunk_type for inv_num in ["invoice number", "invoice #", "bill number"]):
-                    transformed_data["invoice_number"] = text
-                
-                elif any(date_type in chunk_type for date_type in ["invoice date", "date", "issue date"]):
-                    transformed_data["date"] = text
-                
-                elif any(due_type in chunk_type for due_type in ["due date", "payment due"]):
-                    transformed_data["due_date"] = text
-                
-                elif any(total in chunk_type for total in ["total", "amount due", "balance due", "grand total"]):
-                    # Remove any non-numeric characters except decimal point
-                    amount = ''.join(c for c in text if c.isdigit() or c == '.')
-                    if amount:
-                        transformed_data["total_amount"] = amount
-                        
-                # Extract line items from tables
-                if "table" in content_type:
-                    # Process structured table data if available
-                    if "json" in chunk:
-                        for row in chunk["json"]:
-                            # Normalize field names (case-insensitive)
-                            normalized_row = {k.lower(): v for k, v in row.items()}
-                            
-                            # Extract line item fields with multiple possible key names
-                            line_item = {
-                                "description": get_first_value(normalized_row, ["description", "item", "service", "product"]),
-                                "project_number": get_first_value(normalized_row, ["project number", "project #", "project", "job number", "job #"]),
-                                "project_name": get_first_value(normalized_row, ["project name", "job name", "job"]),
-                                "activity_code": get_first_value(normalized_row, ["activity code", "code", "activity", "task code"]),
-                                "quantity": get_first_value(normalized_row, ["quantity", "qty", "units", "hours"]) or "1",
-                                "unit_price": get_first_value(normalized_row, ["unit price", "rate", "unit cost", "price", "cost"]) or "0",
-                                "amount": get_first_value(normalized_row, ["amount", "total", "line total", "extended", "subtotal"]) or "0",
-                                "tax": get_first_value(normalized_row, ["tax", "vat", "gst", "sales tax"]) or "0"
-                            }
-                            
-                            # Ensure numeric fields are strings for consistent handling
-                            for field in ["quantity", "unit_price", "amount", "tax"]:
-                                if line_item[field] is not None and not isinstance(line_item[field], str):
-                                    line_item[field] = str(line_item[field])
-                            
-                            transformed_data["line_items"].append(line_item)
-                
-                # Fallback to semi-structured or narrative content for line items
-                elif any(item_type in chunk_type for item_type in ["line item", "service item", "product item"]):
-                    # Use narrative or text content if available
-                    description = text
-                    
-                    # Extract potential project number using regex
-                    project_number = extract_from_desc(description, r'(?:Project|PN|Job)\s*(?:Number|#|No\.?|ID)?\s*[:=\s]\s*([A-Z0-9-]+)')
-                    
-                    # Extract activity code using regex
-                    activity_code = extract_from_desc(description, r'(?:Activity|Task)\s*(?:Code|#|No\.?)?\s*[:=\s]\s*([A-Z0-9-]+)')
-                    
-                    # Create line item with available information
-                    line_item = {
-                        "description": description,
-                        "project_number": project_number or "",
-                        "project_name": "",  # Often not available in narrative form
-                        "activity_code": activity_code or "",
-                        "quantity": "1",  # Default values
-                        "unit_price": "0",
-                        "amount": "0",
-                        "tax": "0"
-                    }
-                    
-                    # Try to extract detailed line item fields if available
-                    if "details" in chunk:
-                        details = chunk["details"]
-                        if "quantity" in details:
-                            line_item["quantity"] = str(details["quantity"])
-                        if "unitPrice" in details or "rate" in details:
-                            line_item["unit_price"] = str(details.get("unitPrice") or details.get("rate", 0))
-                        if "amount" in details or "total" in details:
-                            line_item["amount"] = str(details.get("amount") or details.get("total", 0))
-                        if "tax" in details:
-                            line_item["tax"] = str(details["tax"])
-                    
-                    transformed_data["line_items"].append(line_item)
-        
-        # Fallback for vendor name if not found
-        if not transformed_data["vendor"]["name"]:
-            # Try to extract from file_summary or use filename
-            if transformed_data["file_summary"]:
-                # Look for vendor/supplier mentions in summary
-                vendor_match = re.search(r'(?:from|by|vendor|supplier)[\s:]+([A-Za-z0-9\s&.,]+?)(?:to|for|invoice|on|dated)', 
-                                        transformed_data["file_summary"], re.IGNORECASE)
-                if vendor_match:
-                    transformed_data["vendor"]["name"] = vendor_match.group(1).strip()
-                else:
-                    # Just use the first part of summary as it often starts with vendor name
-                    transformed_data["vendor"]["name"] = transformed_data["file_summary"].split(",")[0].strip()
-            else:
-                # Extract potential vendor name from filename
-                filename_parts = os.path.splitext(file_name)[0].split('_')
-                if len(filename_parts) > 1:
-                    transformed_data["vendor"]["name"] = filename_parts[0].replace('-', ' ').title()
-        
-        # If we still don't have an invoice number, use the filename
-        if not transformed_data["invoice_number"]:
-            transformed_data["invoice_number"] = os.path.splitext(file_name)[0]
-        
-        logger.debug(f"Transformed data: {json.dumps(transformed_data, indent=2)}")
-        return transformed_data
-        
-    except Exception as e:
-        logger.exception(f"Error transforming X-Ray data: {str(e)}")
-        # Return basic structure with information from filename
-        return {
-            "vendor": {"name": "Unknown Vendor"},
-            "invoice_number": os.path.splitext(file_name)[0],
-            "date": "",
-            "due_date": "",
-            "total_amount": "0",
-            "line_items": [
-                {
-                    "description": f"Error extracting line items: {str(e)}",
-                    "quantity": "1",
-                    "unit_price": "0",
-                    "amount": "0",
-                    "tax": "0"
-                }
-            ]
-        }
+# Only using LlamaCloud for document parsing now
+# This code has been replaced with LlamaCloud API integration
 
 def get_first_value(data_dict, possible_keys):
     """

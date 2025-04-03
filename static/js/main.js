@@ -255,9 +255,7 @@ function displayInvoiceDetails(invoiceData) {
                     
                     // Add a visual indicator of which parser was used
                     if (data.parser_used === 'LlamaCloud') {
-                        parserUsedElement.innerHTML = 'LlamaCloud <span class="badge bg-primary">Primary</span>';
-                    } else if (data.parser_used === 'Eyelevel') {
-                        parserUsedElement.innerHTML = 'Eyelevel <span class="badge bg-secondary">Fallback</span>';
+                        parserUsedElement.innerHTML = 'LlamaCloud <span class="badge bg-primary">API</span>';
                     }
                 }
                 
@@ -288,18 +286,13 @@ function displayInvoiceDetails(invoiceData) {
                 // Add raw OCR data section if available
                 if (data.invoice.parsed_data) {
                     try {
-                        // Check if we have raw data from either LlamaCloud or Eyelevel
+                        // Get the raw data from LlamaCloud
                         let rawData = null;
-                        let dataSourceName = '';
+                        let dataSourceName = 'LlamaCloud';
                         
                         if (data.raw_extraction_data) {
                             // LlamaCloud data
                             rawData = data.raw_extraction_data;
-                            dataSourceName = 'LlamaCloud';
-                        } else if (data.raw_xray_data) {
-                            // Eyelevel data
-                            rawData = data.raw_xray_data;
-                            dataSourceName = 'Eyelevel.ai';
                         }
                         
                         if (rawData) {
