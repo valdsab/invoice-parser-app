@@ -26,19 +26,29 @@ def index():
 def upload_invoice():
     """Handle invoice file upload and initial processing"""
     if 'invoice' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
+        return jsonify({'success': False, 'error': 'No file part'}), 400
     
     file = request.files['invoice']
     if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
+        return jsonify({'success': False, 'error': 'No selected file'}), 400
     
-    if not allowed_file(file.filename):
-        return jsonify({'error': 'File type not allowed'}), 400
+    # Enhanced MIME type validation
+    filename = secure_filename(file.filename)
+    mime_type = file.content_type
+    
+    # Log attempt information
+    logger.info(f"Upload attempt: {filename}, MIME type: {mime_type}")
+    
+    if not allowed_file(filename, mime_type):
+        return jsonify({
+            'success': False, 
+            'error': 'File type not allowed. Only PDF, JPEG, and PNG files are supported.'
+        }), 400
     
     # Save uploaded file to temporary location
     file_path: Optional[str] = None
     try:
-        filename = secure_filename(file.filename)
+        # Create a secure filename to prevent path traversal attacks
         file_path = os.path.join(tempfile.gettempdir(), filename)
         file.save(file_path)
         
@@ -576,6 +586,9 @@ def apply_vendor_mapping_to_invoice(invoice_id, mapping_id):
         invoice = Invoice.query.get_or_404(invoice_id)
         mapping = VendorMapping.query.get_or_404(mapping_id)
         
+        # Log the mapping attempt with detailed information
+        logger.info(f"Applying vendor mapping {mapping_id} ({mapping.vendor_name}) to invoice {invoice_id}")
+        
         # Update the invoice with the mapping ID
         invoice.vendor_mapping_id = mapping.id
         db.session.commit()
@@ -683,11 +696,19 @@ def apply_vendor_mapping_to_invoice(invoice_id, mapping_id):
                         
                         db.session.commit()
                         
+                        # Determine which parser was used
+                        parser_used = "Eyelevel"
+                        if isinstance(stored_data, dict) and 'raw_extraction_data' in stored_data:
+                            parser_used = "LlamaCloud"
+                            
+                        logger.info(f"Successfully applied vendor mapping with {parser_used} parser data")
+                        
                         return jsonify({
                             'success': True,
                             'message': f'Vendor mapping for {mapping.vendor_name} applied to invoice {invoice_id}',
                             'invoice': invoice.to_dict(),
-                            'line_items': [item.to_dict() for item in invoice.line_items]
+                            'line_items': [item.to_dict() for item in invoice.line_items],
+                            'parser_used': parser_used
                         })
             except Exception as parse_error:
                 logger.exception(f"Error reparsing invoice data: {str(parse_error)}")
@@ -701,7 +722,8 @@ def apply_vendor_mapping_to_invoice(invoice_id, mapping_id):
         return jsonify({
             'success': True,
             'message': f'Vendor mapping for {mapping.vendor_name} associated with invoice {invoice_id} (no reparse)',
-            'invoice': invoice.to_dict()
+            'invoice': invoice.to_dict(),
+            'parser_used': 'None'  # No parser was used since there was no reparse
         })
         
     except Exception as e:

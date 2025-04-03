@@ -1,0 +1,60 @@
+TASK OBJECTIVES
+1. Security Improvements
+✅ Enforce MIME type validation server-side (PDF, JPEG, PNG only).
+
+✅ Add MAX_CONTENT_LENGTH = 16 * 1024 * 1024 (16MB) in Flask config to block large file uploads.
+
+✅ Use @app.errorhandler(413) to handle oversized file responses gracefully.
+
+✅ Ensure secure_filename() is used wherever filenames are saved or logged.
+
+✅ Validate/sanitize all user-provided data and invoice fields before DB insert.
+
+2. Workflow and Parser Resilience
+✅ In utils.py, improve parse_invoice() to robustly fall back to Eyelevel.ai on any exception or failure from LlamaCloud.
+
+✅ Make sure raw OCR data from either parser is saved under clear keys (raw_extraction_data or raw_xray).
+
+✅ Add a parser_used field to each invoice entry (optional) or infer from available raw keys.
+
+✅ Implement a job queue or background task stub (e.g., Celery task or threading.Thread) to optionally offload invoice parsing.
+
+3. Frontend UX Enhancements
+✅ On file upload (main.js):
+
+Show progress states visually (step-processing, step-complete, step-error).
+
+Use a 60s client-side timeout. Inform the user if timeout is hit and advise checking history.
+
+✅ Ensure the parser used (LlamaCloud or Eyelevel) is clearly labeled in UI badges (Primary vs Fallback).
+
+✅ Show raw JSON data toggle by parser type (e.g., collapsible "Show Raw Data (LlamaCloud)" section).
+
+4. Error Logging and Monitoring
+✅ Improve logging:
+
+Log OCR failures (including filename and exception)
+
+Log parser fallback events (primary → fallback)
+
+✅ For unexpected server errors (500s), return { success: false, error: <msg> } in JSON format.
+
+✅ Wrap all parsing steps in try/except blocks and ensure fallback paths work even on raised exceptions.
+
+🛠️ FILES AFFECTED
+routes.py – Flask app routing and upload logic
+
+utils.py – Parsing orchestration, transformation, normalization
+
+static/js/main.js – Frontend interactivity and UI status handling
+
+app.py or Flask config – Add file size limit
+
+(Optional) tasks.py – Future background processing
+
+🔍 REMEMBER
+Use meaningful log messages (logger.debug, logger.error, etc.).
+
+Do not use placeholder code. Implement full working logic.
+
+Test upload, parsing, fallback, and UI feedback end-to-end.

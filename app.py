@@ -1,7 +1,7 @@
 import os
 import logging
 
-from flask import Flask
+from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase
 
@@ -44,6 +44,16 @@ db.init_app(app)
 
 # Create uploads directory if it doesn't exist
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+
+# Add error handler for file size limit (413 Payload Too Large)
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    """Handle file upload size limit exceeded errors"""
+    logger.error("File upload size exceeds the limit")
+    return jsonify({
+        'success': False,
+        'error': 'File size exceeds the limit of 16MB'
+    }), 413
 
 # Import routes after app is created to avoid circular imports
 from routes import *

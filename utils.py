@@ -52,10 +52,43 @@ def clean_id(id_value):
     logger.debug(f"Cleaned ID from '{id_value}' to '{cleaned_id}'")
     return cleaned_id
 
-def allowed_file(filename):
-    """Check if file extension is allowed"""
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+def allowed_file(filename, mime_type=None):
+    """
+    Check if file extension and MIME type are allowed
+    
+    Args:
+        filename: The name of the file to check
+        mime_type: Optional MIME type to validate
+        
+    Returns:
+        bool: True if the file is allowed, False otherwise
+    """
+    # Validate file extension
+    if not ('.' in filename and \
+            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']):
+        logger.warning(f"Rejected file with invalid extension: {filename}")
+        return False
+    
+    # Validate MIME type if provided
+    if mime_type:
+        allowed_mime_types = {
+            'application/pdf': ['pdf'],
+            'image/jpeg': ['jpg', 'jpeg'],
+            'image/png': ['png']
+        }
+        
+        # Check if the MIME type is allowed
+        if mime_type not in allowed_mime_types:
+            logger.warning(f"Rejected file with invalid MIME type: {mime_type}")
+            return False
+        
+        # Check if the file extension matches the MIME type
+        extension = filename.rsplit('.', 1)[1].lower()
+        if extension not in allowed_mime_types.get(mime_type, []):
+            logger.warning(f"Rejected file with mismatched MIME type and extension: {mime_type}, {extension}")
+            return False
+    
+    return True
 
 def parse_invoice(file_path):
     """
@@ -72,24 +105,64 @@ def parse_invoice(file_path):
     Returns:
         dict: Result with parsed data or error message
     """
-    # First try with LlamaCloud
-    llama_result = parse_invoice_with_llama_cloud(file_path)
+    parser_used = None
+    primary_error = None
     
-    # If LlamaCloud was successful, return the result
-    if llama_result.get('success'):
-        logger.info("Successfully parsed invoice with LlamaCloud")
-        return llama_result
+    try:
+        # First try with LlamaCloud (primary)
+        logger.info(f"Attempting to parse invoice with LlamaCloud (primary): {file_path}")
+        llama_result = parse_invoice_with_llama_cloud(file_path)
+        parser_used = "LlamaCloud"
+        
+        # If LlamaCloud was successful, return the result
+        if llama_result.get('success'):
+            logger.info("Successfully parsed invoice with LlamaCloud")
+            llama_result['parser_used'] = parser_used
+            return llama_result
+            
+        # Store error message for later
+        primary_error = llama_result.get('error', 'Unknown error with LlamaCloud')
+        logger.warning(f"LlamaCloud parsing failed: {primary_error}. Falling back to Eyelevel.ai.")
     
-    # If LlamaCloud failed, log the error and try with Eyelevel
-    logger.warning(f"LlamaCloud parsing failed: {llama_result.get('error')}. Falling back to Eyelevel.ai.")
-    eyelevel_result = parse_invoice_with_eyelevel(file_path)
+    except Exception as e:
+        # Catch any exception that might occur during LlamaCloud parsing
+        primary_error = str(e)
+        logger.exception(f"Unexpected error in LlamaCloud parsing: {primary_error}")
+        logger.warning("Falling back to Eyelevel.ai due to exception in primary parser")
     
-    if eyelevel_result.get('success'):
-        logger.info("Successfully parsed invoice with Eyelevel.ai (fallback)")
-    else:
+    # If we reach here, LlamaCloud failed - try with Eyelevel.ai (fallback)
+    try:
+        parser_used = "Eyelevel"
+        logger.info(f"Attempting to parse invoice with Eyelevel.ai (fallback): {file_path}")
+        eyelevel_result = parse_invoice_with_eyelevel(file_path)
+        
+        if eyelevel_result.get('success'):
+            logger.info("Successfully parsed invoice with Eyelevel.ai (fallback)")
+            eyelevel_result['parser_used'] = parser_used
+            return eyelevel_result
+            
+        # Both failed - log and return error
         logger.error(f"Both LlamaCloud and Eyelevel.ai parsing failed")
-    
-    return eyelevel_result
+        logger.error(f"  - LlamaCloud error: {primary_error}")
+        logger.error(f"  - Eyelevel error: {eyelevel_result.get('error', 'Unknown error')}")
+        
+        # Return the fallback result with both errors
+        eyelevel_result['primary_parser_error'] = primary_error
+        return eyelevel_result
+        
+    except Exception as e:
+        # Both parsers completely failed with exceptions
+        logger.exception(f"Unexpected error in Eyelevel.ai parsing: {str(e)}")
+        logger.critical("All parsing methods failed with exceptions")
+        
+        # Return a well-structured error response
+        return {
+            'success': False,
+            'error': f"All parsing methods failed. Primary: {primary_error}, Fallback: {str(e)}",
+            'primary_parser_error': primary_error,
+            'fallback_parser_error': str(e),
+            'parser_used': 'None'
+        }
 
 
 def parse_invoice_with_llama_cloud(file_path):
