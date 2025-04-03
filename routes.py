@@ -74,6 +74,11 @@ def upload_invoice():
             # Update invoice with parsed data
             invoice_data = parse_result['data']
             
+            # Add detailed logging of parsed data
+            logger.debug(f"Vendor name resolved: {invoice_data.get('vendor_name')}")
+            logger.debug(f"Mapped fields: {list(invoice_data.keys())}")
+            logger.debug(f"Line items: {invoice_data.get('line_items')}")
+            
             # Get raw extraction data
             raw_data = {}
             data_source_type = "extraction"

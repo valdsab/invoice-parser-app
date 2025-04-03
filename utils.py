@@ -175,6 +175,9 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
         transformed['vendor_name'] = find_field([
             ('vendor', 'name'), ('vendor_name',), ('supplier_name',), ('company_name',)
         ]) or "Unknown Vendor"
+        
+        # Force set vendor field for normalization stages
+        transformed['vendor'] = {'name': transformed['vendor_name']}
 
         transformed['invoice_number'] = str(find_field([
             ('invoice_number',), ('invoiceNumber',), ('id',), ('number',)
@@ -257,7 +260,20 @@ def normalize_invoice(invoice_data):
         if target == 'line_items':
             continue
         for src in sources:
-            val = invoice_data.get(src)
+            # Handle nested field paths (dot notation)
+            if '.' in src:
+                parts = src.split('.')
+                temp = invoice_data
+                for part in parts:
+                    if isinstance(temp, dict) and part in temp:
+                        temp = temp[part]
+                    else:
+                        temp = None
+                        break
+                val = temp
+            else:
+                val = invoice_data.get(src)
+                
             if val:
                 invoice[target] = val
                 break
@@ -286,11 +302,27 @@ def normalize_invoice(invoice_data):
                     break
 
         desc = item.get('description') or ''
+        
+        # Apply standard regex patterns from mapping
         for field, pattern in regex_patterns.items():
             if not item.get(field) and desc:
                 match = extract_from_desc(desc, pattern)
                 if match:
                     item[field] = match
+        
+        # Additional fallback patterns for common fields
+        if not item.get('project_number'):
+            fallback_patterns = [
+                r'(?:PN|Project No)[\s:=]*([A-Z0-9\-]+)',
+                r'(?:Project|Job)[\s:=]*#?\s*([A-Z0-9\-]+)',
+                r'#\s*([A-Z0-9\-]{5,})'
+            ]
+            for pattern in fallback_patterns:
+                match = extract_from_desc(desc, pattern)
+                if match:
+                    item['project_number'] = match
+                    logger.debug(f"Extracted project number using fallback pattern: {match}")
+                    break
 
         for num_field in ['quantity', 'unit_price', 'amount', 'tax']:
             try:
