@@ -13,7 +13,7 @@ import requests
 
 from app import app, db
 from models import Invoice, InvoiceLineItem, VendorMapping
-from utils import allowed_file, parse_invoice, create_zoho_vendor_bill, get_vendor_mapping
+from utils import allowed_file, parse_invoice, get_vendor_mapping
 
 logger = logging.getLogger(__name__)
 
