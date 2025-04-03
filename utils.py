@@ -313,9 +313,91 @@ def extract_from_desc(description, pattern):
     match = re.search(pattern, description)
     return match.group(1) if match else None
 
+def get_vendor_mapping(vendor_name, session=None):
+    """
+    Get vendor-specific field mappings from the database
+    
+    Args:
+        vendor_name: The name of the vendor to look up
+        session: Optional database session
+        
+    Returns:
+        dict: Vendor field mappings or default mappings if not found
+    """
+    from app import db
+    from models import VendorMapping
+    
+    # Default mapping when no custom mapping exists
+    default_mapping = {
+        'field_mappings': {
+            'invoice_number': ['invoice_number', 'invoice #', 'invoice no', 'bill number', 'bill #', 'reference number'],
+            'invoice_date': ['date', 'invoice date', 'bill date', 'issue date'],
+            'due_date': ['due date', 'payment due', 'due by', 'payment due date'],
+            'total_amount': ['total', 'total amount', 'amount due', 'balance due', 'grand total', 'invoice total'],
+            'line_items': {
+                'description': ['description', 'item', 'service', 'product', 'details'],
+                'project_number': ['project number', 'project #', 'project', 'job number', 'job #', 'job code'],
+                'project_name': ['project name', 'job name', 'job', 'project description'],
+                'activity_code': ['activity code', 'code', 'activity', 'task code', 'service code'],
+                'quantity': ['quantity', 'qty', 'units', 'hours', 'count'],
+                'unit_price': ['unit price', 'rate', 'unit cost', 'price', 'cost', 'price per unit'],
+                'amount': ['amount', 'total', 'line total', 'extended', 'subtotal', 'line amount'],
+                'tax': ['tax', 'vat', 'gst', 'sales tax', 'tax amount']
+            }
+        },
+        'regex_patterns': {
+            'project_number': r'(?:Project|PN|Job)\s*(?:Number|#|No\.?|ID)?\s*[:=\s]\s*([A-Z0-9-]+)',
+            'activity_code': r'(?:Activity|Task)\s*(?:Code|#|No\.?)?\s*[:=\s]\s*([A-Z0-9-]+)'
+        }
+    }
+    
+    try:
+        if session is None:
+            session = db.session
+            
+        # Try to find a mapping for this vendor (case-insensitive search)
+        vendor_mapping = None
+        
+        # Exact match first
+        vendor_mapping = session.query(VendorMapping).filter(
+            VendorMapping.vendor_name == vendor_name,
+            VendorMapping.is_active == True
+        ).first()
+        
+        # If no exact match, try case-insensitive match
+        if not vendor_mapping and vendor_name:
+            vendor_mappings = session.query(VendorMapping).filter(
+                VendorMapping.is_active == True
+            ).all()
+            
+            for mapping in vendor_mappings:
+                if mapping.vendor_name.lower() == vendor_name.lower():
+                    vendor_mapping = mapping
+                    break
+        
+        if vendor_mapping and vendor_mapping.field_mappings:
+            try:
+                # Parse the field mappings and regex patterns from JSON
+                custom_mapping = {
+                    'field_mappings': json.loads(vendor_mapping.field_mappings),
+                    'regex_patterns': json.loads(vendor_mapping.regex_patterns) if vendor_mapping.regex_patterns else {}
+                }
+                
+                logger.debug(f"Using custom field mapping for vendor: {vendor_name}")
+                return custom_mapping
+            except (json.JSONDecodeError, Exception) as e:
+                logger.error(f"Error parsing vendor mapping for {vendor_name}: {str(e)}")
+        
+        logger.debug(f"No custom mapping found for vendor: {vendor_name}, using default")
+        return default_mapping
+        
+    except Exception as e:
+        logger.exception(f"Error getting vendor mapping: {str(e)}")
+        return default_mapping
+
 def normalize_invoice(eyelevel_data):
     """
-    Normalize invoice data from Eyelevel.ai response
+    Normalize invoice data from Eyelevel.ai response with vendor-specific mappings
     
     Args:
         eyelevel_data: Raw response data from Eyelevel.ai
@@ -327,32 +409,115 @@ def normalize_invoice(eyelevel_data):
     def safe(v):
         return v if v is not None else None
     
+    # Get vendor name for mapping lookup
+    vendor_name = safe(eyelevel_data.get('vendor', {}).get('name'))
+    
+    # Get vendor-specific field mappings
+    mapping = get_vendor_mapping(vendor_name)
+    field_mappings = mapping['field_mappings']
+    regex_patterns = mapping['regex_patterns']
+    
     # Create base invoice object with normalized fields
     invoice = {
-        'vendor_name': safe(eyelevel_data.get('vendor', {}).get('name')),
-        'invoice_number': safe(eyelevel_data.get('invoice_number')),
-        'invoice_date': safe(eyelevel_data.get('date')),
-        'due_date': safe(eyelevel_data.get('due_date')),
-        'total_amount': float(eyelevel_data.get('total_amount', 0) or 0),
+        'vendor_name': vendor_name,
+        'invoice_number': None,
+        'invoice_date': None,
+        'due_date': None,
+        'total_amount': 0.0,
         'line_items': [],
         'raw_response': eyelevel_data  # Keep the raw response for debugging
     }
     
+    # Apply field mappings to extract invoice header fields
+    for target_field, source_fields in field_mappings.items():
+        if target_field != 'line_items':  # Handle line items separately
+            # Try each possible source field in order of preference
+            for field in source_fields:
+                value = None
+                
+                # Check direct property match
+                if field in eyelevel_data:
+                    value = eyelevel_data[field]
+                
+                # Check nested properties with dot notation
+                elif '.' in field:
+                    parts = field.split('.')
+                    temp = eyelevel_data
+                    valid_path = True
+                    
+                    for part in parts:
+                        if isinstance(temp, dict) and part in temp:
+                            temp = temp[part]
+                        else:
+                            valid_path = False
+                            break
+                    
+                    if valid_path:
+                        value = temp
+                
+                # If we found a value, use it and break the loop
+                if value is not None and value != '':
+                    invoice[target_field] = value
+                    break
+    
+    # Ensure numeric value for total_amount
+    try:
+        invoice['total_amount'] = float(invoice.get('total_amount', 0) or 0)
+    except (ValueError, TypeError):
+        # If conversion fails, try to extract numeric portion
+        if isinstance(invoice.get('total_amount'), str):
+            amount_str = ''.join(c for c in invoice['total_amount'] if c.isdigit() or c == '.')
+            try:
+                invoice['total_amount'] = float(amount_str) if amount_str else 0.0
+            except (ValueError, TypeError):
+                invoice['total_amount'] = 0.0
+        else:
+            invoice['total_amount'] = 0.0
+    
     # Process line items with consistent field structure
     if eyelevel_data.get('line_items') and isinstance(eyelevel_data['line_items'], list):
+        line_item_mappings = field_mappings.get('line_items', {})
+        
         for item in eyelevel_data['line_items']:
-            description = item.get('description') or ''
-            
             line_item = {
-                'description': description,
-                'project_number': item.get('project_number') or extract_from_desc(description, r'PN:?\s*(\d+)'),
-                'project_name': item.get('project_name') or '',
-                'activity_code': item.get('activity_code') or '',
-                'quantity': float(item.get('quantity', 1) or 1),
-                'unit_price': float(item.get('unit_price', 0) or 0),
-                'amount': float(item.get('amount', 0) or 0),
-                'tax': float(item.get('tax', 0) or 0)
+                'description': '',
+                'project_number': '',
+                'project_name': '',
+                'activity_code': '',
+                'quantity': 1.0,
+                'unit_price': 0.0,
+                'amount': 0.0,
+                'tax': 0.0
             }
+            
+            # Apply field mappings for line items
+            for target_field, source_fields in line_item_mappings.items():
+                for field in source_fields:
+                    if field in item and item[field] is not None and item[field] != '':
+                        # Store the value
+                        line_item[target_field] = item[field]
+                        break
+            
+            # Extract data from description using regex if available
+            description = line_item.get('description') or ''
+            
+            # Apply custom regex patterns to extract information from description
+            for field, pattern in regex_patterns.items():
+                if not line_item.get(field) and description:
+                    extracted = extract_from_desc(description, pattern)
+                    if extracted:
+                        line_item[field] = extracted
+            
+            # Fallback for missing project number
+            if not line_item['project_number'] and description:
+                line_item['project_number'] = extract_from_desc(description, r'PN:?\s*(\d+)')
+            
+            # Ensure numeric values
+            for field in ['quantity', 'unit_price', 'amount', 'tax']:
+                try:
+                    line_item[field] = float(line_item[field] or 0)
+                except (ValueError, TypeError):
+                    line_item[field] = 0.0
             
             invoice['line_items'].append(line_item)
     

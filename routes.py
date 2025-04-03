@@ -3,6 +3,7 @@ import json
 import logging
 import tempfile
 import datetime
+from typing import Optional
 from werkzeug.utils import secure_filename
 from flask import (
     render_template, request, jsonify, send_from_directory, 
@@ -11,8 +12,8 @@ from flask import (
 import requests
 
 from app import app, db
-from models import Invoice, InvoiceLineItem
-from utils import allowed_file, parse_invoice_with_eyelevel, create_zoho_vendor_bill
+from models import Invoice, InvoiceLineItem, VendorMapping
+from utils import allowed_file, parse_invoice_with_eyelevel, create_zoho_vendor_bill, get_vendor_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ def upload_invoice():
         return jsonify({'error': 'File type not allowed'}), 400
     
     # Save uploaded file to temporary location
+    file_path: Optional[str] = None
     try:
         filename = secure_filename(file.filename)
         file_path = os.path.join(tempfile.gettempdir(), filename)
@@ -64,27 +66,49 @@ def upload_invoice():
             raw_xray_data = parse_result.get('raw_xray_data', {})
             logger.debug(f"OCR success for invoice {invoice.id}. Raw data: {json.dumps(invoice_data, indent=2)}")
             
-            invoice.vendor_name = invoice_data.get('vendor_name')
+            vendor_name = invoice_data.get('vendor_name')
+            invoice.vendor_name = vendor_name
             invoice.invoice_number = invoice_data.get('invoice_number')
             
+            # Try to find and associate a vendor mapping if available
+            if vendor_name:
+                # Try exact match first
+                vendor_mapping = VendorMapping.query.filter(
+                    VendorMapping.vendor_name == vendor_name,
+                    VendorMapping.is_active == True
+                ).first()
+                
+                # If no exact match, try case-insensitive match
+                if not vendor_mapping:
+                    vendor_mappings = VendorMapping.query.filter(
+                        VendorMapping.is_active == True
+                    ).all()
+                    
+                    for mapping in vendor_mappings:
+                        if mapping.vendor_name.lower() == vendor_name.lower():
+                            vendor_mapping = mapping
+                            break
+                
+                if vendor_mapping:
+                    invoice.vendor_mapping_id = vendor_mapping.id
+                    logger.debug(f"Associated invoice with vendor mapping {vendor_mapping.id} for {vendor_name}")
+            
             # Parse dates
-            if invoice_data.get('invoice_date'):
+            invoice_date = invoice_data.get('invoice_date')
+            if invoice_date and isinstance(invoice_date, str):
                 try:
-                    invoice.invoice_date = datetime.datetime.strptime(
-                        invoice_data.get('invoice_date'), '%Y-%m-%d'
-                    ).date()
+                    invoice.invoice_date = datetime.datetime.strptime(invoice_date, '%Y-%m-%d').date()
                     logger.debug(f"Parsed invoice date: {invoice.invoice_date}")
                 except ValueError:
-                    logger.error(f"Invalid invoice date format: {invoice_data.get('invoice_date')}")
+                    logger.error(f"Invalid invoice date format: {invoice_date}")
             
-            if invoice_data.get('due_date'):
+            due_date = invoice_data.get('due_date')
+            if due_date and isinstance(due_date, str):
                 try:
-                    invoice.due_date = datetime.datetime.strptime(
-                        invoice_data.get('due_date'), '%Y-%m-%d'
-                    ).date()
+                    invoice.due_date = datetime.datetime.strptime(due_date, '%Y-%m-%d').date()
                     logger.debug(f"Parsed due date: {invoice.due_date}")
                 except ValueError:
-                    logger.error(f"Invalid due date format: {invoice_data.get('due_date')}")
+                    logger.error(f"Invalid due date format: {due_date}")
             
             invoice.total_amount = invoice_data.get('total_amount')
             
@@ -140,7 +164,7 @@ def upload_invoice():
         return jsonify({'error': str(e)}), 500
     finally:
         # Clean up temporary file
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
 def fix_stuck_invoices():
@@ -334,3 +358,299 @@ def delete_multiple_invoices():
 def get_deluge_script():
     """Retrieve the Deluge script for Zoho integration"""
     return render_template('deluge_script.txt')
+
+# Vendor Mapping Routes
+@app.route('/vendor-mappings', methods=['GET'])
+def list_vendor_mappings():
+    """Get list of all vendor mappings"""
+    try:
+        vendor_mappings = VendorMapping.query.order_by(VendorMapping.vendor_name).all()
+        return jsonify({
+            'vendor_mappings': [mapping.to_dict() for mapping in vendor_mappings]
+        })
+    except Exception as e:
+        logger.exception(f"Error listing vendor mappings: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/vendor-mappings/<int:mapping_id>', methods=['GET'])
+def get_vendor_mapping_by_id(mapping_id):
+    """Get a specific vendor mapping by ID"""
+    try:
+        mapping = VendorMapping.query.get_or_404(mapping_id)
+        return jsonify({
+            'vendor_mapping': mapping.to_dict()
+        })
+    except Exception as e:
+        logger.exception(f"Error getting vendor mapping {mapping_id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/vendor-mappings', methods=['POST'])
+def create_vendor_mapping():
+    """Create a new vendor mapping"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('vendor_name'):
+            return jsonify({
+                'success': False,
+                'message': 'Vendor name is required'
+            }), 400
+            
+        # Check if vendor mapping already exists
+        existing_mapping = VendorMapping.query.filter_by(
+            vendor_name=data['vendor_name']
+        ).first()
+        
+        if existing_mapping:
+            return jsonify({
+                'success': False,
+                'message': f'Vendor mapping for {data["vendor_name"]} already exists'
+            }), 400
+        
+        # Create mapping with proper JSON serialization
+        field_mappings = data.get('field_mappings')
+        regex_patterns = data.get('regex_patterns')
+        
+        # Validate and serialize JSON
+        if field_mappings and not isinstance(field_mappings, str):
+            field_mappings = json.dumps(field_mappings)
+            
+        if regex_patterns and not isinstance(regex_patterns, str):
+            regex_patterns = json.dumps(regex_patterns)
+        
+        # Create new mapping
+        new_mapping = VendorMapping(
+            vendor_name=data['vendor_name'],
+            field_mappings=field_mappings,
+            regex_patterns=regex_patterns,
+            is_active=data.get('is_active', True)
+        )
+        
+        db.session.add(new_mapping)
+        db.session.commit()
+        
+        logger.debug(f"Created vendor mapping for {data['vendor_name']}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Vendor mapping for {data["vendor_name"]} created successfully',
+            'vendor_mapping': new_mapping.to_dict()
+        })
+        
+    except Exception as e:
+        logger.exception(f"Error creating vendor mapping: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error creating vendor mapping: {str(e)}'
+        }), 500
+
+@app.route('/vendor-mappings/<int:mapping_id>', methods=['PUT'])
+def update_vendor_mapping(mapping_id):
+    """Update an existing vendor mapping"""
+    try:
+        mapping = VendorMapping.query.get_or_404(mapping_id)
+        data = request.get_json()
+        
+        # Update fields if provided
+        if 'vendor_name' in data:
+            # Check if new vendor name would create a duplicate
+            if data['vendor_name'] != mapping.vendor_name:
+                existing = VendorMapping.query.filter_by(
+                    vendor_name=data['vendor_name']
+                ).first()
+                
+                if existing and existing.id != mapping_id:
+                    return jsonify({
+                        'success': False,
+                        'message': f'Vendor mapping for {data["vendor_name"]} already exists'
+                    }), 400
+                    
+            mapping.vendor_name = data['vendor_name']
+        
+        # Update and serialize field mappings if provided
+        if 'field_mappings' in data:
+            if data['field_mappings'] and not isinstance(data['field_mappings'], str):
+                mapping.field_mappings = json.dumps(data['field_mappings'])
+            else:
+                mapping.field_mappings = data['field_mappings']
+        
+        # Update and serialize regex patterns if provided
+        if 'regex_patterns' in data:
+            if data['regex_patterns'] and not isinstance(data['regex_patterns'], str):
+                mapping.regex_patterns = json.dumps(data['regex_patterns'])
+            else:
+                mapping.regex_patterns = data['regex_patterns']
+        
+        # Update active status if provided
+        if 'is_active' in data:
+            mapping.is_active = data['is_active']
+        
+        mapping.updated_at = datetime.datetime.utcnow()
+        db.session.commit()
+        
+        logger.debug(f"Updated vendor mapping {mapping_id} for {mapping.vendor_name}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Vendor mapping for {mapping.vendor_name} updated successfully',
+            'vendor_mapping': mapping.to_dict()
+        })
+        
+    except Exception as e:
+        logger.exception(f"Error updating vendor mapping {mapping_id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error updating vendor mapping: {str(e)}'
+        }), 500
+
+@app.route('/vendor-mappings/<int:mapping_id>', methods=['DELETE'])
+def delete_vendor_mapping(mapping_id):
+    """Delete a vendor mapping"""
+    try:
+        mapping = VendorMapping.query.get_or_404(mapping_id)
+        vendor_name = mapping.vendor_name
+        
+        db.session.delete(mapping)
+        db.session.commit()
+        
+        logger.debug(f"Deleted vendor mapping {mapping_id} for {vendor_name}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Vendor mapping for {vendor_name} deleted successfully'
+        })
+        
+    except Exception as e:
+        logger.exception(f"Error deleting vendor mapping {mapping_id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error deleting vendor mapping: {str(e)}'
+        }), 500
+
+@app.route('/invoices/<int:invoice_id>/apply-mapping/<int:mapping_id>', methods=['POST'])
+def apply_vendor_mapping_to_invoice(invoice_id, mapping_id):
+    """Apply a vendor mapping to an existing invoice and reparse it"""
+    try:
+        invoice = Invoice.query.get_or_404(invoice_id)
+        mapping = VendorMapping.query.get_or_404(mapping_id)
+        
+        # Update the invoice with the mapping ID
+        invoice.vendor_mapping_id = mapping.id
+        db.session.commit()
+        
+        # If the invoice has parsed data, reapply the mapping
+        if invoice.parsed_data and invoice.status in ['parsed', 'completed']:
+            try:
+                # Parse the stored data
+                stored_data = json.loads(invoice.parsed_data)
+                raw_xray_data = {}
+                
+                # Extract the raw X-Ray data if available
+                if isinstance(stored_data, dict) and 'raw_xray' in stored_data:
+                    raw_xray_data = stored_data.get('raw_xray', {})
+                    
+                # Re-normalize the data with the new mapping
+                if raw_xray_data:
+                    # Prepare data for normalization in the format expected by transform_xray_to_invoice_format
+                    from utils import transform_xray_to_invoice_format, normalize_invoice
+                    
+                    # Transform the raw X-Ray data
+                    transformed_data = transform_xray_to_invoice_format(raw_xray_data, invoice.file_name)
+                    
+                    # Force the vendor name to match our mapping
+                    if transformed_data and isinstance(transformed_data, dict) and 'vendor' in transformed_data:
+                        transformed_data['vendor']['name'] = mapping.vendor_name
+                    
+                    # Normalize the transformed data with the new mapping
+                    normalized_data = normalize_invoice(transformed_data)
+                    
+                    # Update invoice with newly normalized data
+                    if normalized_data:
+                        # Update invoice fields
+                        invoice.vendor_name = normalized_data.get('vendor_name')
+                        invoice.invoice_number = normalized_data.get('invoice_number')
+                        
+                        # Parse dates
+                        invoice_date = normalized_data.get('invoice_date')
+                        if invoice_date and isinstance(invoice_date, str):
+                            try:
+                                invoice.invoice_date = datetime.datetime.strptime(
+                                    invoice_date, '%Y-%m-%d'
+                                ).date()
+                            except ValueError:
+                                logger.warning(f"Invalid invoice date format: {invoice_date}")
+                        
+                        due_date = normalized_data.get('due_date')
+                        if due_date and isinstance(due_date, str):
+                            try:
+                                invoice.due_date = datetime.datetime.strptime(
+                                    due_date, '%Y-%m-%d'
+                                ).date()
+                            except ValueError:
+                                logger.warning(f"Invalid due date format: {due_date}")
+                        
+                        invoice.total_amount = normalized_data.get('total_amount')
+                        
+                        # Store updated data
+                        updated_parsed_data = {
+                            'normalized': normalized_data,
+                            'raw_xray': raw_xray_data
+                        }
+                        invoice.parsed_data = json.dumps(updated_parsed_data)
+                        
+                        # Update line items
+                        # First delete existing line items
+                        InvoiceLineItem.query.filter_by(invoice_id=invoice.id).delete()
+                        
+                        # Then add new ones
+                        line_items = normalized_data.get('line_items', [])
+                        for item_data in line_items:
+                            line_item = InvoiceLineItem(
+                                invoice_id=invoice.id,
+                                description=item_data.get('description'),
+                                quantity=item_data.get('quantity'),
+                                unit_price=item_data.get('unit_price'),
+                                amount=item_data.get('amount'),
+                                tax=item_data.get('tax', 0),
+                                project_number=item_data.get('project_number'),
+                                project_name=item_data.get('project_name'),
+                                activity_code=item_data.get('activity_code')
+                            )
+                            db.session.add(line_item)
+                        
+                        db.session.commit()
+                        
+                        return jsonify({
+                            'success': True,
+                            'message': f'Vendor mapping for {mapping.vendor_name} applied to invoice {invoice_id}',
+                            'invoice': invoice.to_dict(),
+                            'line_items': [item.to_dict() for item in invoice.line_items]
+                        })
+            except Exception as parse_error:
+                logger.exception(f"Error reparsing invoice data: {str(parse_error)}")
+                return jsonify({
+                    'success': False,
+                    'message': f'Error reparsing invoice data: {str(parse_error)}'
+                }), 500
+        
+        # If we get here, we either had no parsed data or had an error reparsing
+        # Return success for the mapping association but note no reparse
+        return jsonify({
+            'success': True,
+            'message': f'Vendor mapping for {mapping.vendor_name} associated with invoice {invoice_id} (no reparse)',
+            'invoice': invoice.to_dict()
+        })
+        
+    except Exception as e:
+        logger.exception(f"Error applying vendor mapping to invoice: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Error applying vendor mapping: {str(e)}'
+        }), 500
