@@ -363,12 +363,13 @@ def parse_invoice_with_llama_cloud(file_path):
 
 def parse_invoice_with_eyelevel(file_path):
     """
-    Parse invoice using the GroundX SDK (Eyelevel.ai)
+    Parse invoice using the Eyelevel.ai API directly
     
     Process:
-    1. Upload the file to a bucket
-    2. Wait for ingestion to complete
-    3. Return the parsed X-Ray data or an error message in JSON
+    1. Upload the file to Eyelevel's /xray/upload endpoint
+    2. Get the xray_url from the response
+    3. Send the xray_url to /xray/parse endpoint
+    4. Return the parsed data or an error message in JSON
     
     Args:
         file_path: Path to the invoice file
@@ -402,206 +403,100 @@ def parse_invoice_with_eyelevel(file_path):
                 'error': "API key not configured. Please set the EYELEVEL_API_KEY environment variable."
             }
         
-        logger.debug(f"Parsing invoice with GroundX SDK: {file_path}")
-        
-        # Get file name and type
+        # Get file name for logging and transformation
         file_name = os.path.basename(file_path)
-        file_extension = os.path.splitext(file_name)[1].lower().replace('.', '')
+        logger.debug(f"Parsing invoice with Eyelevel.ai API: {file_name}")
         
-        # Initialize the GroundX client
-        from groundx import GroundX, Document
-        import httpx
+        # Prepare headers for API calls
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json"
+        }
         
-        # Create a custom HTTP transport with middleware for header sanitization
-        class HeaderSanitizingTransport(httpx.HTTPTransport):
-            def handle_request(self, request):
-                # Sanitize all header values before sending
-                for name, value in list(request.headers.items()):
-                    if isinstance(value, bytes):
-                        # Replace with clean string value
-                        clean_value = value.decode('utf-8', errors='ignore').strip()
-                        clean_value = re.sub(r'\s+', '', clean_value)
-                        request.headers[name] = clean_value
-                    elif isinstance(value, str) and re.search(r'\s', value):
-                        # Clean any strings with whitespace
-                        clean_value = re.sub(r'\s+', '', value)
-                        request.headers[name] = clean_value
-                        
-                return super().handle_request(request)
-
-        # Create a client with our custom transport
-        httpx_client = httpx.Client(transport=HeaderSanitizingTransport())
-        client = GroundX(api_key=api_key, httpx_client=httpx_client)
-        logger.debug("Initialized GroundX client with custom header sanitization")
+        # Step 1: Upload file to Eyelevel.ai
+        upload_url = "https://api.eyelevel.ai/xray/upload"
         
-        # STEP 1: UPLOAD THE FILE TO A BUCKET
-        # Try to create bucket or use existing one
-        try:
-            # Try to create a new bucket specifically for invoices
-            bucket_response = client.buckets.create(name="invoice_docs")
-            bucket_id = clean_id(bucket_response.bucket.bucket_id)
-            logger.debug(f"Created new bucket: {bucket_id}")
-        except Exception as bucket_error:
-            # Bucket might already exist, try to get existing buckets
-            logger.debug(f"Error creating bucket, will try to use existing: {str(bucket_error)}")
-            buckets_response = client.buckets.list()
-            if not buckets_response.buckets:
-                raise Exception("Failed to create or find any buckets")
-                
-            bucket_id = clean_id(buckets_response.buckets[0].bucket_id)
-            logger.debug(f"Using existing bucket: {bucket_id}")
+        logger.debug(f"Uploading file to Eyelevel.ai: {file_name}")
         
-        # Upload file to bucket
-        logger.debug(f"Uploading document to GroundX bucket: {file_path}")
-        upload_response = client.ingest(
-            documents=[
-                Document(
-                    bucket_id=bucket_id,
-                    file_name=os.path.splitext(file_name)[0],  # filename without extension
-                    file_path=file_path,
-                    file_type=file_extension
-                )
-            ]
+        # Upload the file using the files parameter in requests
+        with open(file_path, 'rb') as file_object:
+            upload_response = requests.post(
+                upload_url,
+                headers=headers,
+                files={"file": (file_name, file_object)},
+                timeout=API_REQUEST_TIMEOUT
+            )
+        
+        # Check if the upload request was successful
+        upload_response.raise_for_status()
+        upload_data = upload_response.json()
+        
+        # Get the xray_url from the response
+        if 'xray_url' not in upload_data:
+            error_msg = f"X-Ray URL not found in upload response: {upload_data}"
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'error': error_msg
+            }
+            
+        xray_url = upload_data['xray_url']
+        logger.debug(f"File uploaded successfully. X-Ray URL: {xray_url}")
+        
+        # Step 2: Send xray_url to /xray/parse for processing
+        parse_url = "https://api.eyelevel.ai/xray/parse"
+        
+        logger.debug("Sending X-Ray URL for parsing")
+        parse_response = requests.post(
+            parse_url,
+            headers={**headers, "Content-Type": "application/json"},
+            json={"xray_url": xray_url},
+            timeout=API_REQUEST_TIMEOUT
         )
         
-        # STEP 2: WAIT FOR INGESTION TO COMPLETE
-        process_id = clean_id(upload_response.ingest.process_id)
-        logger.debug(f"Document uploaded. Process ID: {process_id}")
+        # Check if the parse request was successful
+        parse_response.raise_for_status()
+        parse_data = parse_response.json()
         
-        logger.debug("Waiting for document ingestion and processing to complete...")
-        max_wait_time = 25  # Maximum wait time to avoid worker timeout (30s limit)
-        min_wait_time = 5   # Minimum wait time to allow initial processing
-        start_time = time.time()
-        poll_interval = 1.5  # Shorter interval for more responsive polling
+        # Extract the data field from the response
+        if 'data' not in parse_data:
+            error_msg = f"Data field not found in parse response: {parse_data}"
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'error': error_msg
+            }
         
-        # First check status immediately
-        status = client.documents.get_processing_status_by_id(process_id=process_id)
-        current_status = status.ingest.status
-        logger.debug(f"Initial processing status: {current_status}")
+        xray_data = parse_data['data']
+        logger.debug("Successfully parsed document with Eyelevel.ai")
         
-        # If status is already complete, we can proceed
-        if current_status == "complete":
-            logger.debug("Document processing completed immediately")
-        else:
-            # Wait for the document to finish processing
-            while time.time() - start_time < max_wait_time:
-                status = client.documents.get_processing_status_by_id(process_id=process_id)
-                current_status = status.ingest.status
-                
-                logger.debug(f"Current processing status: {current_status}")
-                
-                if current_status == "complete":
-                    logger.debug("Document processing completed successfully")
-                    break
-                elif current_status in ("error", "cancelled"):
-                    error_msg = f"Document processing failed with status: {current_status}"
-                    logger.error(error_msg)
-                    return {
-                        'success': False,
-                        'error': error_msg
-                    }
-                
-                # If we've waited at least the minimum time and status is still processing,
-                # we'll proceed anyway and try to get what data we can
-                if time.time() - start_time > min_wait_time and current_status in ("processing", "training"):
-                    logger.warning(f"Proceeding with partial processing after {int(time.time() - start_time)}s - status: {current_status}")
-                    break
-                    
-                # Sleep briefly between checks
-                time.sleep(poll_interval)
-            
-            # If we exited the loop due to timeout, log it but try to proceed
-            if time.time() - start_time >= max_wait_time and current_status not in ("complete", "error", "cancelled"):
-                logger.warning(f"Document processing timeout after {max_wait_time}s, attempting to proceed with partial results")
-        
-        # STEP 3: RETURN THE PARSED X-RAY DATA OR ERROR MESSAGE
-        # Ensure bucket_id is properly formatted before lookup
-        bucket_id = clean_id(bucket_id)
-        
-        # Fetch document metadata from bucket
-        document_response = client.documents.lookup(id=bucket_id)
-        if not document_response.documents:
-            raise Exception("No documents found in bucket after processing")
-        
-        # Get the most recently uploaded document (should be the one we just processed)
-        document = document_response.documents[0]
-        xray_url = document.xray_url
-        
-        if not xray_url:
-            raise Exception("X-Ray URL not found in document metadata")
-            
-        logger.debug(f"Retrieving X-Ray data from: {xray_url}")
-        
-        # Get full X-Ray output with robust error handling
-        try:
-            # Use requests instead of urllib for better error handling
-            response = requests.get(xray_url, timeout=30)
-            
-            # Check for HTTP errors
-            response.raise_for_status()
-            
-            # Verify content type is JSON
-            content_type = response.headers.get('Content-Type', '')
-            if 'application/json' not in content_type.lower():
-                error_preview = response.text[:200] + '...' if len(response.text) > 200 else response.text
-                logger.error(f"X-Ray URL returned non-JSON response. Content-Type: {content_type}")
-                logger.error(f"Response preview: {error_preview}")
-                raise ValueError(f"Expected JSON response but got {content_type}. Response starts with: {error_preview[:50]}...")
-            
-            # Parse JSON response
-            xray_data = response.json()
-            
-            # Validate that we got valid data with expected fields
-            if not xray_data or not isinstance(xray_data, dict):
-                logger.error(f"X-Ray data is not a valid dictionary: {type(xray_data)}")
-                raise ValueError("Invalid X-Ray data format received")
-                
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP Error fetching X-Ray data: {e}")
-            error_preview = ""
-            if hasattr(e, 'response') and e.response is not None:
-                error_preview = e.response.text[:200] + '...' if len(e.response.text) > 200 else e.response.text
-                logger.error(f"Error response preview: {error_preview}")
-            raise Exception(f"Failed to fetch X-Ray data: HTTP {e.response.status_code if hasattr(e, 'response') and e.response is not None else 'unknown'}")
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Network error fetching X-Ray data: {e}")
-            raise Exception(f"Network error fetching X-Ray data: {str(e)}")
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse X-Ray JSON data: {e}")
-            # Get a preview of the response if available
-            error_preview = ""
-            # Initialize response variable to avoid "possibly unbound" error
-            response = None
-            if 'response' in locals() and locals()['response'] is not None:
-                response = locals()['response']
-                if hasattr(response, 'text'):
-                    error_preview = response.text[:200] + '...' if len(response.text) > 200 else response.text
-                    logger.error(f"Invalid JSON response preview: {error_preview}")
-            raise Exception(f"Failed to parse X-Ray JSON data: {str(e)}. Response preview: {error_preview[:50] if error_preview else 'N/A'}...")
-        
-        logger.debug("X-Ray data retrieved successfully")
-        
-        # Transform X-Ray data into our expected format
+        # Transform the X-Ray data into our invoice format
         transformed_data = transform_xray_to_invoice_format(xray_data, file_name)
         
         # Use the normalize_invoice function to standardize data across different vendors
         invoice_data = normalize_invoice(transformed_data)
         
-        logger.debug(f"Normalized invoice data: {json.dumps(invoice_data, indent=2)}")
+        logger.debug(f"Normalized invoice data from Eyelevel.ai: {json.dumps(invoice_data, indent=2)}")
         
         return {
             'success': True,
             'data': invoice_data,
-            'raw_xray_data': xray_data  # Return the raw X-Ray data for reference or debugging
+            'raw_xray': xray_data  # Return the raw X-Ray data for reference
         }
-        
-    except Exception as e:
-        logger.exception(f"Error parsing invoice with GroundX: {str(e)}")
+            
+    except requests.exceptions.RequestException as re:
+        error_msg = f"Eyelevel.ai API request failed: {str(re)}"
+        logger.exception(error_msg)
         return {
             'success': False,
-            'error': str(e)
+            'error': f"Eyelevel parsing failed: {str(re)}"
+        }
+    except Exception as e:
+        error_msg = f"Error parsing invoice with Eyelevel.ai: {str(e)}"
+        logger.exception(error_msg)
+        return {
+            'success': False,
+            'error': f"Eyelevel parsing failed: {str(e)}"
         }
 
 def extract_from_desc(description, pattern):
