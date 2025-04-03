@@ -5,14 +5,7 @@ import requests
 import re
 import time
 import urllib.request
-import httpx
 from app import app
-
-# Import GroundX SDK here so it's available throughout the module
-try:
-    from groundx import GroundX, Document
-except ImportError:
-    logging.error("GroundX SDK not found. Please install it with 'pip install groundx'.")
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +85,11 @@ def allowed_file(filename, mime_type=None):
 
 def parse_invoice(file_path):
     """
-    Parse invoice using LlamaCloud API, with fallback to Eyelevel.ai
+    Parse invoice using LlamaCloud API
     
     Process:
     1. Try to parse using LlamaCloud API
-    2. If LlamaCloud fails, fall back to Eyelevel.ai
-    3. Return the parsed data or an error message in JSON
+    2. Return the parsed data or an error message in JSON
     
     Args:
         file_path: Path to the invoice file
@@ -105,63 +97,35 @@ def parse_invoice(file_path):
     Returns:
         dict: Result with parsed data or error message
     """
-    parser_used = None
-    primary_error = None
+    parser_used = "LlamaCloud"
     
     try:
-        # First try with LlamaCloud (primary)
-        logger.info(f"Attempting to parse invoice with LlamaCloud (primary): {file_path}")
-        llama_result = parse_invoice_with_llama_cloud(file_path)
-        parser_used = "LlamaCloud"
+        # Parse with LlamaCloud
+        logger.info(f"Parsing invoice with LlamaCloud: {file_path}")
+        result = parse_invoice_with_llama_cloud(file_path)
         
-        # If LlamaCloud was successful, return the result
-        if llama_result.get('success'):
+        # Add which parser was used
+        result['parser_used'] = parser_used
+        
+        # If successful, log it
+        if result.get('success'):
             logger.info("Successfully parsed invoice with LlamaCloud")
-            llama_result['parser_used'] = parser_used
-            return llama_result
+        else:
+            # Log error
+            error_msg = result.get('error', 'Unknown error with LlamaCloud')
+            logger.error(f"LlamaCloud parsing failed: {error_msg}")
+        
+        return result
             
-        # Store error message for later
-        primary_error = llama_result.get('error', 'Unknown error with LlamaCloud')
-        logger.warning(f"LlamaCloud parsing failed: {primary_error}. Falling back to Eyelevel.ai.")
-    
     except Exception as e:
-        # Catch any exception that might occur during LlamaCloud parsing
-        primary_error = str(e)
-        logger.exception(f"Unexpected error in LlamaCloud parsing: {primary_error}")
-        logger.warning("Falling back to Eyelevel.ai due to exception in primary parser")
-    
-    # If we reach here, LlamaCloud failed - try with Eyelevel.ai (fallback)
-    try:
-        parser_used = "Eyelevel"
-        logger.info(f"Attempting to parse invoice with Eyelevel.ai (fallback): {file_path}")
-        eyelevel_result = parse_invoice_with_eyelevel(file_path)
+        # Catch any exception that might occur during parsing
+        error_msg = str(e)
+        logger.exception(f"Unexpected error in invoice parsing: {error_msg}")
         
-        if eyelevel_result.get('success'):
-            logger.info("Successfully parsed invoice with Eyelevel.ai (fallback)")
-            eyelevel_result['parser_used'] = parser_used
-            return eyelevel_result
-            
-        # Both failed - log and return error
-        logger.error(f"Both LlamaCloud and Eyelevel.ai parsing failed")
-        logger.error(f"  - LlamaCloud error: {primary_error}")
-        logger.error(f"  - Eyelevel error: {eyelevel_result.get('error', 'Unknown error')}")
-        
-        # Return the fallback result with both errors
-        eyelevel_result['primary_parser_error'] = primary_error
-        return eyelevel_result
-        
-    except Exception as e:
-        # Both parsers completely failed with exceptions
-        logger.exception(f"Unexpected error in Eyelevel.ai parsing: {str(e)}")
-        logger.critical("All parsing methods failed with exceptions")
-        
-        # Return a well-structured error response
         return {
             'success': False,
-            'error': f"All parsing methods failed. Primary: {primary_error}, Fallback: {str(e)}",
-            'primary_parser_error': primary_error,
-            'fallback_parser_error': str(e),
-            'parser_used': 'None'
+            'error': f"Invoice parsing failed: {error_msg}",
+            'parser_used': parser_used
         }
 
 
@@ -220,7 +184,7 @@ def parse_invoice_with_llama_cloud(file_path):
         
         # Step 1: Upload file to LlamaCloud
         base_url = "https://api.llama-api.com"
-        upload_url = f"{base_url}/documents/upload-url"
+        upload_url = f"{base_url}/api/documents/upload-url"  # Updated to include /api prefix
         
         # Get presigned URL for file upload
         logger.debug("Requesting presigned URL for file upload")
@@ -257,7 +221,7 @@ def parse_invoice_with_llama_cloud(file_path):
         logger.debug("File uploaded successfully")
         
         # Step 2: Process the document for invoice extraction
-        process_url = f"{base_url}/documents/{document_id}/process"
+        process_url = f"{base_url}/api/documents/{document_id}/process"  # Updated to include /api prefix
         process_data = {
             "processors": ["invoice-extraction"]
         }
@@ -280,7 +244,7 @@ def parse_invoice_with_llama_cloud(file_path):
         logger.debug(f"Extraction task created: {task_id}")
         
         # Step 3: Poll for task completion
-        task_url = f"{base_url}/tasks/{task_id}"
+        task_url = f"{base_url}/api/tasks/{task_id}"  # Updated to include /api prefix
         max_wait_time = MAX_POLLING_TIMEOUT
         poll_interval = 2.0
         start_time = time.time()
@@ -323,7 +287,7 @@ def parse_invoice_with_llama_cloud(file_path):
             }
         
         # Step 4: Get extraction results
-        results_url = f"{base_url}/tasks/{task_id}/result"
+        results_url = f"{base_url}/api/tasks/{task_id}/result"  # Updated to include /api prefix
         logger.debug(f"Retrieving extraction results for task: {task_id}")
         
         results_response = requests.get(
