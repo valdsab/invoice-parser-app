@@ -141,6 +141,7 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
     """
     try:
         logger.debug(f"Transforming LlamaCloud data for: {file_name}")
+        logger.debug(f"Extraction data keys: {list(extraction_data.keys()) if isinstance(extraction_data, dict) else 'Not dict'}")
         if isinstance(extraction_data, dict):
             for potential_key in ['data', 'document', 'results', 'content', 'extraction']:
                 if potential_key in extraction_data and isinstance(extraction_data[potential_key], dict):
@@ -167,7 +168,7 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
                     else:
                         temp = None
                         break
-                if temp:
+                if temp not in [None, ""]:
                     return temp
             return None
 
@@ -258,12 +259,17 @@ def normalize_invoice(invoice_data):
                 break
 
     try:
-        invoice['total_amount'] = float(invoice.get('total_amount', 0) or 0)
+        amt = invoice.get('total_amount', 0)
+        invoice['total_amount'] = float(str(amt).replace('$', '').replace(',', '')) if amt else 0.0
     except:
         invoice['total_amount'] = 0.0
 
     item_map = field_mappings.get('line_items', {})
-    for raw in invoice_data.get('line_items', []):
+    raw_items = invoice_data.get('line_items') or []
+    if not isinstance(raw_items, list):
+        raw_items = []
+        
+    for raw in raw_items:
         item = {
             'description': '', 'project_number': '', 'project_name': '',
             'activity_code': '', 'quantity': 1.0, 'unit_price': 0.0,
