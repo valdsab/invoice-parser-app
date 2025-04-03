@@ -61,6 +61,7 @@ def upload_invoice():
         if parse_result['success']:
             # Update invoice with parsed data
             invoice_data = parse_result['data']
+            raw_xray_data = parse_result.get('raw_xray_data', {})
             logger.debug(f"OCR success for invoice {invoice.id}. Raw data: {json.dumps(invoice_data, indent=2)}")
             
             invoice.vendor_name = invoice_data.get('vendor_name')
@@ -86,7 +87,13 @@ def upload_invoice():
                     logger.error(f"Invalid due date format: {invoice_data.get('due_date')}")
             
             invoice.total_amount = invoice_data.get('total_amount')
-            invoice.parsed_data = json.dumps(invoice_data)
+            
+            # Store both normalized and raw X-Ray data for completeness
+            parsed_data = {
+                'normalized': invoice_data,
+                'raw_xray': raw_xray_data
+            }
+            invoice.parsed_data = json.dumps(parsed_data)
             invoice.status = "parsed"
             
             # Add line items
@@ -194,10 +201,37 @@ def get_invoice(invoice_id):
     invoice = Invoice.query.get_or_404(invoice_id)
     line_items = [item.to_dict() for item in invoice.line_items]
     
-    return jsonify({
+    # Parse the stored JSON data
+    parsed_data = {}
+    raw_xray_data = {}
+    if invoice.parsed_data:
+        try:
+            stored_data = json.loads(invoice.parsed_data)
+            if isinstance(stored_data, dict):
+                # Check if data is in the new format (with normalized and raw_xray fields)
+                if 'normalized' in stored_data:
+                    parsed_data = stored_data.get('normalized', {})
+                    raw_xray_data = stored_data.get('raw_xray', {})
+                else:
+                    # Old format - the entire stored_data is the normalized data
+                    parsed_data = stored_data
+        except json.JSONDecodeError:
+            logger.error(f"Invalid JSON data stored for invoice {invoice_id}")
+    
+    # Check if client wants raw data (via query parameter)
+    include_raw = request.args.get('include_raw', 'false').lower() == 'true'
+    
+    response_data = {
         'invoice': invoice.to_dict(),
-        'line_items': line_items
-    })
+        'line_items': line_items,
+        'parsed_data': parsed_data  # Include the normalized parsed data
+    }
+    
+    # Include raw X-Ray data if requested
+    if include_raw and raw_xray_data:
+        response_data['raw_xray_data'] = raw_xray_data
+    
+    return jsonify(response_data)
 
 @app.route('/create_vendor_bill/<int:invoice_id>', methods=['POST'])
 def create_vendor_bill(invoice_id):

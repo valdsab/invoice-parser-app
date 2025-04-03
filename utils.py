@@ -57,6 +57,11 @@ def parse_invoice_with_eyelevel(file_path):
     """
     Parse invoice using the GroundX SDK (Eyelevel.ai)
     
+    Process:
+    1. Upload the file to a bucket
+    2. Wait for ingestion to complete
+    3. Return the parsed X-Ray data or an error message in JSON
+    
     Args:
         file_path: Path to the invoice file
         
@@ -96,9 +101,8 @@ def parse_invoice_with_eyelevel(file_path):
         file_extension = os.path.splitext(file_name)[1].lower().replace('.', '')
         
         # Initialize the GroundX client
-        # We'll need to patch the underlying HTTP client to handle header values properly
-        import httpx
         from groundx import GroundX, Document
+        import httpx
         
         # Create a custom HTTP transport with middleware for header sanitization
         class HeaderSanitizingTransport(httpx.HTTPTransport):
@@ -122,11 +126,12 @@ def parse_invoice_with_eyelevel(file_path):
         client = GroundX(api_key=api_key, httpx_client=httpx_client)
         logger.debug("Initialized GroundX client with custom header sanitization")
         
-        # Create or use existing bucket
+        # STEP 1: UPLOAD THE FILE TO A BUCKET
+        # Try to create bucket or use existing one
         try:
+            # Try to create a new bucket specifically for invoices
             bucket_response = client.buckets.create(name="invoice_docs")
             bucket_id = clean_id(bucket_response.bucket.bucket_id)
-                
             logger.debug(f"Created new bucket: {bucket_id}")
         except Exception as bucket_error:
             # Bucket might already exist, try to get existing buckets
@@ -136,11 +141,10 @@ def parse_invoice_with_eyelevel(file_path):
                 raise Exception("Failed to create or find any buckets")
                 
             bucket_id = clean_id(buckets_response.buckets[0].bucket_id)
-                
             logger.debug(f"Using existing bucket: {bucket_id}")
         
-        # Upload file
-        logger.debug(f"Uploading document to GroundX: {file_path}")
+        # Upload file to bucket
+        logger.debug(f"Uploading document to GroundX bucket: {file_path}")
         upload_response = client.ingest(
             documents=[
                 Document(
@@ -152,16 +156,15 @@ def parse_invoice_with_eyelevel(file_path):
             ]
         )
         
-        # Wait for processing
+        # STEP 2: WAIT FOR INGESTION TO COMPLETE
         process_id = clean_id(upload_response.ingest.process_id)
-            
         logger.debug(f"Document uploaded. Process ID: {process_id}")
         
-        logger.debug("Waiting for document processing to complete...")
-        max_wait_time = 25  # reduced maximum wait time to avoid worker timeout (30s limit)
-        min_wait_time = 5   # minimum wait time to allow initial processing
+        logger.debug("Waiting for document ingestion and processing to complete...")
+        max_wait_time = 25  # Maximum wait time to avoid worker timeout (30s limit)
+        min_wait_time = 5   # Minimum wait time to allow initial processing
         start_time = time.time()
-        poll_interval = 1.5  # shorter interval for more responsive polling
+        poll_interval = 1.5  # Shorter interval for more responsive polling
         
         # First check status immediately
         status = client.documents.get_processing_status_by_id(process_id=process_id)
@@ -172,8 +175,7 @@ def parse_invoice_with_eyelevel(file_path):
         if current_status == "complete":
             logger.debug("Document processing completed immediately")
         else:
-            # If document needs more time to process, check for a minimal period
-            # but short enough to avoid worker timeout
+            # Wait for the document to finish processing
             while time.time() - start_time < max_wait_time:
                 status = client.documents.get_processing_status_by_id(process_id=process_id)
                 current_status = status.ingest.status
@@ -204,10 +206,11 @@ def parse_invoice_with_eyelevel(file_path):
             if time.time() - start_time >= max_wait_time and current_status not in ("complete", "error", "cancelled"):
                 logger.warning(f"Document processing timeout after {max_wait_time}s, attempting to proceed with partial results")
         
-        # Fetch parsed document
+        # STEP 3: RETURN THE PARSED X-RAY DATA OR ERROR MESSAGE
         # Ensure bucket_id is properly formatted before lookup
         bucket_id = clean_id(bucket_id)
-            
+        
+        # Fetch document metadata from bucket
         document_response = client.documents.lookup(id=bucket_id)
         if not document_response.documents:
             raise Exception("No documents found in bucket after processing")
@@ -216,6 +219,9 @@ def parse_invoice_with_eyelevel(file_path):
         document = document_response.documents[0]
         xray_url = document.xray_url
         
+        if not xray_url:
+            raise Exception("X-Ray URL not found in document metadata")
+            
         logger.debug(f"Retrieving X-Ray data from: {xray_url}")
         
         # Get full X-Ray output with robust error handling
@@ -258,10 +264,14 @@ def parse_invoice_with_eyelevel(file_path):
             logger.error(f"Failed to parse X-Ray JSON data: {e}")
             # Get a preview of the response if available
             error_preview = ""
-            if 'response' in locals() and hasattr(response, 'text'):
-                error_preview = response.text[:200] + '...' if len(response.text) > 200 else response.text
-                logger.error(f"Invalid JSON response preview: {error_preview}")
-            raise Exception(f"Failed to parse X-Ray JSON data: {str(e)}. Response preview: {error_preview[:50]}...")
+            # Initialize response variable to avoid "possibly unbound" error
+            response = None
+            if 'response' in locals() and locals()['response'] is not None:
+                response = locals()['response']
+                if hasattr(response, 'text'):
+                    error_preview = response.text[:200] + '...' if len(response.text) > 200 else response.text
+                    logger.error(f"Invalid JSON response preview: {error_preview}")
+            raise Exception(f"Failed to parse X-Ray JSON data: {str(e)}. Response preview: {error_preview[:50] if error_preview else 'N/A'}...")
         
         logger.debug("X-Ray data retrieved successfully")
         
@@ -275,7 +285,8 @@ def parse_invoice_with_eyelevel(file_path):
         
         return {
             'success': True,
-            'data': invoice_data
+            'data': invoice_data,
+            'raw_xray_data': xray_data  # Return the raw X-Ray data for reference or debugging
         }
         
     except Exception as e:
