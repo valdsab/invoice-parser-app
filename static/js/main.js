@@ -246,9 +246,11 @@ function displayInvoiceDetails(invoiceData) {
         lineItemsTable.innerHTML = '';
         
         // Load line items and raw OCR data
+        console.log("Fetching invoice details in displayInvoiceDetails for ID:", invoiceData.id);
         fetch(`/invoices/${invoiceData.id}`)
             .then(response => response.json())
             .then(data => {
+                console.log("Received details in displayInvoiceDetails:", data);
                 // Display which parser was used
                 if (parserUsedElement) {
                     parserUsedElement.textContent = data.parser_used || 'Unknown';
@@ -290,9 +292,28 @@ function displayInvoiceDetails(invoiceData) {
                         let rawData = null;
                         let dataSourceName = 'LlamaCloud';
                         
+                        // Debug what's coming from the server
+                        console.log("Complete data object:", data);
+                        
                         if (data.raw_extraction_data) {
                             // LlamaCloud data
                             rawData = data.raw_extraction_data;
+                            console.log("Raw LlamaCloud extraction data found:", rawData);
+                        } else {
+                            console.log("No raw_extraction_data field found in response. Looking in parsed_data for alternative sources.");
+                            
+                            // Try to find raw data in alternative locations
+                            if (data.invoice && data.invoice.parsed_data) {
+                                try {
+                                    const parsedDataObj = JSON.parse(data.invoice.parsed_data);
+                                    if (parsedDataObj.raw_extraction_data) {
+                                        rawData = parsedDataObj.raw_extraction_data;
+                                        console.log("Found raw extraction data in parsed_data object:", rawData);
+                                    }
+                                } catch (e) {
+                                    console.error("Error parsing invoice.parsed_data:", e);
+                                }
+                            }
                         }
                         
                         if (rawData) {
@@ -656,9 +677,11 @@ function deleteSelectedInvoices() {
  * View invoice details
  */
 function viewInvoice(invoiceId) {
+    console.log("Viewing invoice:", invoiceId);
     fetch(`/invoices/${invoiceId}`)
         .then(response => response.json())
         .then(data => {
+            console.log("Received invoice data:", data);
             // Set current invoice ID
             currentInvoiceId = invoiceId;
             

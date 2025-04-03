@@ -293,20 +293,28 @@ def get_invoice(invoice_id):
     
     if invoice.parsed_data:
         try:
+            logger.debug(f"Parsing stored JSON data for invoice {invoice_id}: {invoice.parsed_data[:100]}...")
             stored_data = json.loads(invoice.parsed_data)
+            logger.debug(f"JSON parsed successfully. Structure: {list(stored_data.keys()) if isinstance(stored_data, dict) else 'Not a dict'}")
+            
             if isinstance(stored_data, dict):
                 # Check if data is in the newer formats
                 if 'normalized' in stored_data:
                     parsed_data = stored_data.get('normalized', {})
+                    logger.debug(f"Found normalized data structure. Keys: {list(parsed_data.keys()) if isinstance(parsed_data, dict) else 'Not a dict'}")
                     
                     # Get raw extraction data if present
                     if 'raw_extraction_data' in stored_data:
                         raw_data = stored_data.get('raw_extraction_data', {})
+                        logger.debug(f"Found raw_extraction_data in stored_data. Type: {type(raw_data)}")
+                    else:
+                        logger.debug("No raw_extraction_data found in stored_data")
                 else:
                     # Old format - the entire stored_data is the normalized data
                     parsed_data = stored_data
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON data stored for invoice {invoice_id}")
+                    logger.debug("Using old format - entire stored_data is normalized data")
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON data stored for invoice {invoice_id}: {str(e)}")
     
     # Always include raw data by default
     response_data = {
