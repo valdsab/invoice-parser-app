@@ -16,6 +16,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Timeout settings
+API_REQUEST_TIMEOUT = 30  # seconds
+MAX_POLLING_TIMEOUT = 25  # seconds for waiting on async operations
+
 def clean_id(id_value):
     """
     Clean an ID value to ensure it's a proper string with no whitespace or byte prefixes.
@@ -52,6 +56,237 @@ def allowed_file(filename):
     """Check if file extension is allowed"""
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+def parse_invoice(file_path):
+    """
+    Parse invoice using LlamaCloud API, with fallback to Eyelevel.ai
+    
+    Process:
+    1. Try to parse using LlamaCloud API
+    2. If LlamaCloud fails, fall back to Eyelevel.ai
+    3. Return the parsed data or an error message in JSON
+    
+    Args:
+        file_path: Path to the invoice file
+        
+    Returns:
+        dict: Result with parsed data or error message
+    """
+    # First try with LlamaCloud
+    llama_result = parse_invoice_with_llama_cloud(file_path)
+    
+    # If LlamaCloud was successful, return the result
+    if llama_result.get('success'):
+        logger.info("Successfully parsed invoice with LlamaCloud")
+        return llama_result
+    
+    # If LlamaCloud failed, log the error and try with Eyelevel
+    logger.warning(f"LlamaCloud parsing failed: {llama_result.get('error')}. Falling back to Eyelevel.ai.")
+    eyelevel_result = parse_invoice_with_eyelevel(file_path)
+    
+    if eyelevel_result.get('success'):
+        logger.info("Successfully parsed invoice with Eyelevel.ai (fallback)")
+    else:
+        logger.error(f"Both LlamaCloud and Eyelevel.ai parsing failed")
+    
+    return eyelevel_result
+
+
+def parse_invoice_with_llama_cloud(file_path):
+    """
+    Parse invoice using the LlamaCloud API
+    
+    Process:
+    1. Upload the file to LlamaCloud API
+    2. Wait for processing to complete
+    3. Return the parsed data or an error message in JSON
+    
+    Args:
+        file_path: Path to the invoice file
+        
+    Returns:
+        dict: Result with parsed data or error message
+    """
+    try:
+        # Check if the file exists
+        if not os.path.exists(file_path):
+            return {
+                'success': False,
+                'error': f"File not found: {file_path}"
+            }
+            
+        # Get the file size
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            return {
+                'success': False,
+                'error': "Empty file"
+            }
+        
+        # Get the API key from environment variables
+        api_key = os.environ.get('LLAMA_CLOUD_API_ENTOS')
+        if not api_key:
+            logger.error("LLAMA_CLOUD_API_ENTOS environment variable is not set")
+            return {
+                'success': False,
+                'error': "LlamaCloud API key not configured. Please set the LLAMA_CLOUD_API_ENTOS environment variable."
+            }
+        
+        logger.debug(f"Parsing invoice with LlamaCloud API: {file_path}")
+        
+        # Get file name and type
+        file_name = os.path.basename(file_path)
+        file_extension = os.path.splitext(file_name)[1].lower()
+        
+        # Prepare headers for API calls
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        # Step 1: Upload file to LlamaCloud
+        base_url = "https://api.llama-api.com"
+        upload_url = f"{base_url}/documents/upload-url"
+        
+        # Get presigned URL for file upload
+        logger.debug("Requesting presigned URL for file upload")
+        presigned_response = requests.post(
+            upload_url,
+            headers=headers,
+            json={"fileName": file_name},
+            timeout=API_REQUEST_TIMEOUT
+        )
+        presigned_response.raise_for_status()
+        presigned_data = presigned_response.json()
+        
+        upload_data = presigned_data.get("data", {})
+        document_id = upload_data.get("documentId")
+        presigned_url = upload_data.get("uploadUrl")
+        
+        if not presigned_url or not document_id:
+            raise Exception(f"Invalid presigned URL response: {presigned_data}")
+        
+        logger.debug(f"Received presigned URL. Document ID: {document_id}")
+        
+        # Upload the file using the presigned URL
+        with open(file_path, "rb") as file:
+            file_content = file.read()
+        
+        logger.debug(f"Uploading file to LlamaCloud: {file_name}")
+        upload_response = requests.put(
+            presigned_url,
+            data=file_content,
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=API_REQUEST_TIMEOUT
+        )
+        upload_response.raise_for_status()
+        logger.debug("File uploaded successfully")
+        
+        # Step 2: Process the document for invoice extraction
+        process_url = f"{base_url}/documents/{document_id}/process"
+        process_data = {
+            "processors": ["invoice-extraction"]
+        }
+        
+        logger.debug(f"Requesting invoice extraction for document: {document_id}")
+        process_response = requests.post(
+            process_url,
+            headers=headers,
+            json=process_data,
+            timeout=API_REQUEST_TIMEOUT
+        )
+        process_response.raise_for_status()
+        process_result = process_response.json()
+        
+        # Get the task ID
+        task_id = process_result.get("data", {}).get("taskId")
+        if not task_id:
+            raise Exception(f"Invalid process response, no task ID: {process_result}")
+        
+        logger.debug(f"Extraction task created: {task_id}")
+        
+        # Step 3: Poll for task completion
+        task_url = f"{base_url}/tasks/{task_id}"
+        max_wait_time = MAX_POLLING_TIMEOUT
+        poll_interval = 2.0
+        start_time = time.time()
+        
+        logger.debug("Waiting for invoice extraction to complete...")
+        while time.time() - start_time < max_wait_time:
+            task_response = requests.get(
+                task_url,
+                headers=headers,
+                timeout=API_REQUEST_TIMEOUT
+            )
+            task_response.raise_for_status()
+            task_data = task_response.json().get("data", {})
+            task_status = task_data.get("status")
+            
+            logger.debug(f"Current task status: {task_status}")
+            
+            if task_status == "COMPLETED":
+                logger.debug("Invoice extraction completed successfully")
+                break
+            elif task_status in ("FAILED", "CANCELED"):
+                error_details = task_data.get("errorDetails", "Unknown error")
+                error_msg = f"Invoice extraction failed with status: {task_status}. Error: {error_details}"
+                logger.error(error_msg)
+                return {
+                    'success': False,
+                    'error': error_msg
+                }
+            
+            # Sleep briefly between checks
+            time.sleep(poll_interval)
+            
+        # Check if we timed out
+        if time.time() - start_time >= max_wait_time:
+            error_msg = f"Invoice extraction timed out after {max_wait_time}s"
+            logger.error(error_msg)
+            return {
+                'success': False,
+                'error': error_msg
+            }
+        
+        # Step 4: Get extraction results
+        results_url = f"{base_url}/tasks/{task_id}/result"
+        logger.debug(f"Retrieving extraction results for task: {task_id}")
+        
+        results_response = requests.get(
+            results_url,
+            headers=headers,
+            timeout=API_REQUEST_TIMEOUT
+        )
+        results_response.raise_for_status()
+        extraction_data = results_response.json().get("data", {})
+        
+        if not extraction_data:
+            raise Exception("Empty extraction results received")
+        
+        logger.debug("Extraction results retrieved successfully")
+        
+        # Transform LlamaCloud data into our expected format
+        transformed_data = transform_llama_cloud_to_invoice_format(extraction_data, file_name)
+        
+        # Use the normalize_invoice function to standardize data across different vendors
+        invoice_data = normalize_invoice(transformed_data)
+        
+        logger.debug(f"Normalized invoice data: {json.dumps(invoice_data, indent=2)}")
+        
+        return {
+            'success': True,
+            'data': invoice_data,
+            'raw_extraction_data': extraction_data  # Return the raw extraction data for reference
+        }
+        
+    except Exception as e:
+        logger.exception(f"Error parsing invoice with LlamaCloud: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
 
 def parse_invoice_with_eyelevel(file_path):
     """
@@ -523,6 +758,106 @@ def normalize_invoice(eyelevel_data):
     
     logger.debug(f"Normalized invoice data: {json.dumps(invoice, indent=2)}")
     return invoice
+
+def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
+    """
+    Transform LlamaCloud extraction data into a format compatible with our invoice model
+    
+    Args:
+        extraction_data: The extraction data from LlamaCloud API
+        file_name: The original file name of the invoice
+        
+    Returns:
+        dict: Transformed data in a format expected by normalize_invoice()
+    """
+    try:
+        logger.debug(f"Transforming LlamaCloud extraction data for: {file_name}")
+        
+        # Get the invoice extraction results
+        invoice_data = extraction_data.get("invoice", {})
+        if not invoice_data:
+            raise ValueError("No invoice data found in extraction results")
+            
+        # Extract vendor info
+        vendor_name = invoice_data.get("vendor", {}).get("name", "Unknown Vendor")
+        
+        # Extract invoice metadata
+        invoice_number = invoice_data.get("invoiceNumber", "")
+        invoice_date = invoice_data.get("invoiceDate", "")
+        due_date = invoice_data.get("dueDate", "")
+        total_amount = invoice_data.get("totalAmount", {}).get("amount", 0)
+        
+        # Extract line items
+        line_items_data = invoice_data.get("lineItems", [])
+        line_items = []
+        
+        for item in line_items_data:
+            # Extract line item fields
+            description = item.get("description", "")
+            quantity = item.get("quantity", 0)
+            unit_price = item.get("unitPrice", {}).get("amount", 0)
+            amount = item.get("amount", {}).get("amount", 0)
+            tax = item.get("tax", {}).get("amount", 0)
+            
+            # Look for project number and activity code in the description
+            project_number = None
+            project_name = None
+            activity_code = None
+            
+            # Attempt to extract project number and activity code using regex patterns
+            if description:
+                project_number_pattern = r'(?:Project|PN|Job)\s*(?:Number|#|No\.?|ID)?\s*[:=\s]\s*([A-Z0-9-]+)'
+                activity_code_pattern = r'(?:Activity|Task)\s*(?:Code|#|No\.?)?\s*[:=\s]\s*([A-Z0-9-]+)'
+                
+                project_number_match = re.search(project_number_pattern, description)
+                if project_number_match:
+                    project_number = project_number_match.group(1)
+                
+                activity_code_match = re.search(activity_code_pattern, description)
+                if activity_code_match:
+                    activity_code = activity_code_match.group(1)
+            
+            # Create line item
+            line_item = {
+                "description": description,
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "amount": amount,
+                "tax": tax,
+                "project_number": project_number,
+                "project_name": project_name,
+                "activity_code": activity_code
+            }
+            
+            line_items.append(line_item)
+        
+        # Assemble the transformed data
+        transformed_data = {
+            "vendor_name": vendor_name,
+            "invoice_number": invoice_number,
+            "invoice_date": invoice_date,
+            "due_date": due_date,
+            "total_amount": total_amount,
+            "file_name": file_name,
+            "line_items": line_items
+        }
+        
+        logger.debug(f"Successfully transformed LlamaCloud data for: {file_name}")
+        return transformed_data
+        
+    except Exception as e:
+        logger.exception(f"Error transforming LlamaCloud data: {str(e)}")
+        # Return minimal data structure to prevent further errors
+        return {
+            "vendor_name": "Unknown",
+            "invoice_number": "",
+            "invoice_date": "",
+            "due_date": "",
+            "total_amount": 0,
+            "file_name": file_name,
+            "line_items": []
+        }
+
 
 def transform_xray_to_invoice_format(xray_data, file_name):
     """

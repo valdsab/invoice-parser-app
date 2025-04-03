@@ -13,7 +13,7 @@ import requests
 
 from app import app, db
 from models import Invoice, InvoiceLineItem, VendorMapping
-from utils import allowed_file, parse_invoice_with_eyelevel, create_zoho_vendor_bill, get_vendor_mapping
+from utils import allowed_file, parse_invoice, create_zoho_vendor_bill, get_vendor_mapping
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +56,31 @@ def upload_invoice():
         
         logger.debug(f"Processing invoice {invoice.id} - {filename}")
         
-        # Parse invoice with Eyelevel.ai
-        logger.debug(f"Sending invoice {invoice.id} to Eyelevel.ai OCR API: {file_path}")
-        parse_result = parse_invoice_with_eyelevel(file_path)
+        # Parse invoice with LlamaCloud (falls back to Eyelevel.ai)
+        logger.debug(f"Sending invoice {invoice.id} to invoice parsing OCR API: {file_path}")
+        parse_result = parse_invoice(file_path)
         
         if parse_result['success']:
             # Update invoice with parsed data
             invoice_data = parse_result['data']
-            raw_xray_data = parse_result.get('raw_xray_data', {})
+            
+            # Get raw data based on which parser was used
+            raw_data = {}
+            data_source_type = ""
+            
+            if 'raw_xray_data' in parse_result:
+                # Using Eyelevel
+                raw_data = parse_result.get('raw_xray_data', {})
+                data_source_type = "xray"
+                logger.debug(f"Invoice {invoice.id} parsed with Eyelevel (fallback)")
+            elif 'raw_extraction_data' in parse_result:
+                # Using LlamaCloud
+                raw_data = parse_result.get('raw_extraction_data', {}) 
+                data_source_type = "extraction"
+                logger.debug(f"Invoice {invoice.id} parsed with LlamaCloud (primary)")
+            else:
+                # No raw data found
+                logger.warning(f"No raw data found in parse result for invoice {invoice.id}")
             logger.debug(f"OCR success for invoice {invoice.id}. Raw data: {json.dumps(invoice_data, indent=2)}")
             
             vendor_name = invoice_data.get('vendor_name')
@@ -112,11 +129,16 @@ def upload_invoice():
             
             invoice.total_amount = invoice_data.get('total_amount')
             
-            # Store both normalized and raw X-Ray data for completeness
+            # Store both normalized and raw data for completeness
             parsed_data = {
-                'normalized': invoice_data,
-                'raw_xray': raw_xray_data
+                'normalized': invoice_data
             }
+            
+            # Store the appropriate raw data based on source type
+            if data_source_type == "extraction":
+                parsed_data['raw_extraction_data'] = raw_data
+            else:
+                parsed_data['raw_xray'] = raw_data
             invoice.parsed_data = json.dumps(parsed_data)
             invoice.status = "parsed"
             
@@ -227,15 +249,24 @@ def get_invoice(invoice_id):
     
     # Parse the stored JSON data
     parsed_data = {}
-    raw_xray_data = {}
+    raw_data = {}
+    raw_data_type = "xray"  # Default to Eyelevel X-Ray data type
+    
     if invoice.parsed_data:
         try:
             stored_data = json.loads(invoice.parsed_data)
             if isinstance(stored_data, dict):
-                # Check if data is in the new format (with normalized and raw_xray fields)
+                # Check if data is in the newer formats
                 if 'normalized' in stored_data:
                     parsed_data = stored_data.get('normalized', {})
-                    raw_xray_data = stored_data.get('raw_xray', {})
+                    
+                    # Check which type of raw data is present
+                    if 'raw_extraction_data' in stored_data:
+                        raw_data = stored_data.get('raw_extraction_data', {})
+                        raw_data_type = "extraction"  # LlamaCloud extraction data
+                    elif 'raw_xray' in stored_data:
+                        raw_data = stored_data.get('raw_xray', {})
+                        raw_data_type = "xray"  # Eyelevel X-Ray data
                 else:
                     # Old format - the entire stored_data is the normalized data
                     parsed_data = stored_data
@@ -248,12 +279,16 @@ def get_invoice(invoice_id):
     response_data = {
         'invoice': invoice.to_dict(),
         'line_items': line_items,
-        'parsed_data': parsed_data  # Include the normalized parsed data
+        'parsed_data': parsed_data,  # Include the normalized parsed data
+        'parser_used': "LlamaCloud" if raw_data_type == "extraction" else "Eyelevel"
     }
     
-    # Include raw X-Ray data if requested
-    if include_raw and raw_xray_data:
-        response_data['raw_xray_data'] = raw_xray_data
+    # Include raw data if requested
+    if include_raw and raw_data:
+        if raw_data_type == "extraction":
+            response_data['raw_extraction_data'] = raw_data
+        else:
+            response_data['raw_xray_data'] = raw_data
     
     return jsonify(response_data)
 
@@ -552,17 +587,27 @@ def apply_vendor_mapping_to_invoice(invoice_id, mapping_id):
                 stored_data = json.loads(invoice.parsed_data)
                 raw_xray_data = {}
                 
-                # Extract the raw X-Ray data if available
-                if isinstance(stored_data, dict) and 'raw_xray' in stored_data:
-                    raw_xray_data = stored_data.get('raw_xray', {})
+                # Extract the raw data based on source
+                if isinstance(stored_data, dict):
+                    if 'raw_xray' in stored_data:
+                        raw_xray_data = stored_data.get('raw_xray', {})
+                    # Check for LlamaCloud data as well
+                    elif 'raw_extraction_data' in stored_data:
+                        raw_xray_data = stored_data.get('raw_extraction_data', {})
                     
                 # Re-normalize the data with the new mapping
                 if raw_xray_data:
-                    # Prepare data for normalization in the format expected by transform_xray_to_invoice_format
-                    from utils import transform_xray_to_invoice_format, normalize_invoice
+                    # Prepare data for normalization
+                    from utils import transform_xray_to_invoice_format, transform_llama_cloud_to_invoice_format, normalize_invoice
                     
-                    # Transform the raw X-Ray data
-                    transformed_data = transform_xray_to_invoice_format(raw_xray_data, invoice.file_name)
+                    # Check if the data is from LlamaCloud or Eyelevel
+                    if isinstance(stored_data, dict) and 'raw_extraction_data' in stored_data:
+                        # Data is from LlamaCloud
+                        raw_extraction_data = stored_data.get('raw_extraction_data', {})
+                        transformed_data = transform_llama_cloud_to_invoice_format(raw_extraction_data, invoice.file_name)
+                    else:
+                        # Data is from Eyelevel (X-Ray)
+                        transformed_data = transform_xray_to_invoice_format(raw_xray_data, invoice.file_name)
                     
                     # Force the vendor name to match our mapping
                     if transformed_data and isinstance(transformed_data, dict) and 'vendor' in transformed_data:
@@ -599,10 +644,21 @@ def apply_vendor_mapping_to_invoice(invoice_id, mapping_id):
                         invoice.total_amount = normalized_data.get('total_amount')
                         
                         # Store updated data
-                        updated_parsed_data = {
-                            'normalized': normalized_data,
-                            'raw_xray': raw_xray_data
-                        }
+                        updated_parsed_data = {}
+                        
+                        # Preserve the raw data format based on source
+                        if isinstance(stored_data, dict) and 'raw_extraction_data' in stored_data:
+                            # LlamaCloud data
+                            updated_parsed_data = {
+                                'normalized': normalized_data,
+                                'raw_extraction_data': raw_xray_data
+                            }
+                        else:
+                            # Eyelevel data
+                            updated_parsed_data = {
+                                'normalized': normalized_data,
+                                'raw_xray': raw_xray_data
+                            }
                         invoice.parsed_data = json.dumps(updated_parsed_data)
                         
                         # Update line items

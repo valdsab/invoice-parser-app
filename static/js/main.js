@@ -226,6 +226,7 @@ function displayInvoiceDetails(invoiceData) {
     const invoiceDateElement = document.getElementById('invoice-date');
     const dueDateElement = document.getElementById('due-date');
     const totalAmountElement = document.getElementById('total-amount');
+    const parserUsedElement = document.getElementById('parser-used');
     const lineItemsTable = document.getElementById('line-items-table').querySelector('tbody');
     
     // Show the invoice details container
@@ -248,6 +249,18 @@ function displayInvoiceDetails(invoiceData) {
         fetch(`/invoices/${invoiceData.id}`)
             .then(response => response.json())
             .then(data => {
+                // Display which parser was used
+                if (parserUsedElement) {
+                    parserUsedElement.textContent = data.parser_used || 'Unknown';
+                    
+                    // Add a visual indicator of which parser was used
+                    if (data.parser_used === 'LlamaCloud') {
+                        parserUsedElement.innerHTML = 'LlamaCloud <span class="badge bg-primary">Primary</span>';
+                    } else if (data.parser_used === 'Eyelevel') {
+                        parserUsedElement.innerHTML = 'Eyelevel <span class="badge bg-secondary">Fallback</span>';
+                    }
+                }
+                
                 // Populate line items table
                 const lineItems = data.line_items;
                 if (lineItems && lineItems.length > 0) {
@@ -275,8 +288,21 @@ function displayInvoiceDetails(invoiceData) {
                 // Add raw OCR data section if available
                 if (data.invoice.parsed_data) {
                     try {
-                        const parsedData = JSON.parse(data.invoice.parsed_data);
-                        if (parsedData.raw_response) {
+                        // Check if we have raw data from either LlamaCloud or Eyelevel
+                        let rawData = null;
+                        let dataSourceName = '';
+                        
+                        if (data.raw_extraction_data) {
+                            // LlamaCloud data
+                            rawData = data.raw_extraction_data;
+                            dataSourceName = 'LlamaCloud';
+                        } else if (data.raw_xray_data) {
+                            // Eyelevel data
+                            rawData = data.raw_xray_data;
+                            dataSourceName = 'Eyelevel.ai';
+                        }
+                        
+                        if (rawData) {
                             // Create raw data section if not exists
                             let rawDataSection = document.getElementById('raw-ocr-data-section');
                             if (!rawDataSection) {
@@ -287,12 +313,13 @@ function displayInvoiceDetails(invoiceData) {
                                 rawDataSection.className = 'mt-4';
                                 
                                 const heading = document.createElement('h4');
-                                heading.textContent = 'Raw OCR Data (Eyelevel.ai)';
+                                heading.id = 'raw-data-heading';
+                                heading.textContent = `Raw OCR Data (${dataSourceName})`;
                                 rawDataSection.appendChild(heading);
                                 
                                 const toggleBtn = document.createElement('button');
                                 toggleBtn.className = 'btn btn-sm btn-info mb-2';
-                                toggleBtn.textContent = 'Show/Hide Raw Data';
+                                toggleBtn.textContent = 'Show Raw Data';
                                 toggleBtn.onclick = function() {
                                     const pre = document.getElementById('raw-ocr-json');
                                     if (pre.classList.contains('d-none')) {
@@ -313,11 +340,19 @@ function displayInvoiceDetails(invoiceData) {
                                 rawDataSection.appendChild(pre);
                                 
                                 parent.appendChild(rawDataSection);
+                            } else {
+                                // Update the heading to show correct data source
+                                const heading = document.getElementById('raw-data-heading');
+                                if (heading) {
+                                    heading.textContent = `Raw OCR Data (${dataSourceName})`;
+                                }
                             }
                             
                             // Update raw data content
                             const pre = document.getElementById('raw-ocr-json');
-                            pre.textContent = JSON.stringify(parsedData.raw_response, null, 2);
+                            if (pre) {
+                                pre.textContent = JSON.stringify(rawData, null, 2);
+                            }
                         }
                     } catch (e) {
                         console.error('Error parsing OCR data:', e);
