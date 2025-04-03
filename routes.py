@@ -82,10 +82,25 @@ def upload_invoice():
             raw_data = parse_result.get('raw_extraction_data', {}) 
             logger.debug(f"Invoice {invoice.id} parsed with LlamaCloud")
             
+            # Enhanced debugging for raw data
             if not raw_data:
                 # No raw data found
                 logger.warning(f"No raw data found in parse result for invoice {invoice.id}")
-            logger.debug(f"OCR success for invoice {invoice.id}. Raw data: {json.dumps(invoice_data, indent=2)}")
+                logger.debug(f"Complete parse_result keys: {list(parse_result.keys())}")
+                logger.debug(f"Parse result success: {parse_result.get('success')}")
+            else:
+                try:
+                    logger.debug(f"Raw data type: {type(raw_data)}")
+                    if isinstance(raw_data, dict):
+                        logger.debug(f"Raw data keys: {list(raw_data.keys())}")
+                        for key in raw_data.keys():
+                            value = raw_data[key]
+                            logger.debug(f"Raw data[{key}] type: {type(value)}")
+                except Exception as e:
+                    logger.error(f"Error inspecting raw data: {str(e)}")
+            
+            # Log the normalized data for comparison
+            logger.debug(f"OCR success for invoice {invoice.id}. Normalized data: {json.dumps(invoice_data, indent=2)}")
             
             vendor_name = invoice_data.get('vendor_name')
             invoice.vendor_name = vendor_name

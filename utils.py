@@ -295,6 +295,13 @@ def parse_invoice_with_llama_cloud(file_path):
         if not extraction_data:
             raise Exception("Empty extraction results received")
         
+        # Log the raw response for debugging
+        try:
+            logger.debug("LlamaCloud Raw Response: %s", json.dumps(extraction_data, indent=2))
+        except Exception as e:
+            logger.error(f"Could not serialize LlamaCloud response for logging: {str(e)}")
+            logger.debug(f"LlamaCloud Raw Response Type: {type(extraction_data)}, Content preview: {str(extraction_data)[:500]}")
+        
         logger.debug("Extraction results retrieved successfully")
         
         # Transform LlamaCloud data into our expected format
@@ -562,6 +569,13 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
     """
     try:
         logger.debug(f"Transforming LlamaCloud extraction data for: {file_name}")
+        
+        # Log the structure of the extraction_data
+        logger.debug(f"Extraction data type: {type(extraction_data)}")
+        if isinstance(extraction_data, dict):
+            logger.debug(f"Extraction data keys: {list(extraction_data.keys())}")
+        else:
+            logger.debug(f"Extraction data is not a dictionary: {str(extraction_data)[:200]}")
         
         # Get the invoice extraction results - the format is different in our API response
         # In the parsing API, the invoice data may be at the root level
