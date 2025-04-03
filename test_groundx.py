@@ -1,26 +1,26 @@
 import os
 import json
 import logging
-from utils import parse_invoice_with_eyelevel
+from utils import parse_invoice_with_llama_cloud, parse_invoice  # Use both functions
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-def test_groundx_integration():
+def test_llama_cloud_integration():
     """
-    Test the GroundX SDK integration to make sure it:
-    1. Uploads a file to a bucket
-    2. Waits for ingestion
-    3. Returns parsed X-Ray data or an error message
+    Test the LlamaCloud API integration to make sure it:
+    1. Uploads a file to the API
+    2. Processes the document
+    3. Returns parsed invoice data or an error message
     """
     
-    print("\n======== Testing GroundX Integration ========")
+    print("\n======== Testing LlamaCloud Integration ========")
     
     # Check if API key is set
-    api_key = os.environ.get('EYELEVEL_API_KEY')
+    api_key = os.environ.get('LLAMA_CLOUD_API_ENTOS')
     if not api_key:
-        print("ERROR: EYELEVEL_API_KEY is not set in environment variables.")
+        print("ERROR: LLAMA_CLOUD_API_ENTOS is not set in environment variables.")
         print("Please set the API key and try again.")
         return False
         
@@ -41,9 +41,15 @@ def test_groundx_integration():
     test_file = os.path.join(test_dir, test_files[0])
     print(f"Using test file: {test_file}")
     
-    # Process the file with GroundX
-    print("Sending file to GroundX for processing...")
-    result = parse_invoice_with_eyelevel(test_file)
+    # Process the file with LlamaCloud directly
+    print("Sending file directly to LlamaCloud for processing...")
+    result = parse_invoice_with_llama_cloud(test_file)
+    
+    # If direct API call fails, try through the wrapper
+    if not result['success']:
+        print(f"Direct API call failed: {result.get('error')}")
+        print("Trying through the wrapper function...")
+        result = parse_invoice(test_file)
     
     # Check result
     if result['success']:
@@ -64,13 +70,14 @@ def test_groundx_integration():
             for i, item in enumerate(line_items):
                 print(f"  {i+1}. {item.get('description')[:50]}... - ${item.get('amount')}")
         
-        # Confirm raw X-Ray data is available
-        raw_data = result.get('raw_xray_data', {})
+        # Confirm raw extraction data is available
+        raw_data = result.get('raw_extraction_data', {})
         if raw_data:
-            print(f"\nRaw X-Ray data contains {len(json.dumps(raw_data))} characters")
-            print("Raw data keys: " + ", ".join(raw_data.keys()))
+            print(f"\nRaw extraction data contains {len(json.dumps(raw_data))} characters")
+            if isinstance(raw_data, dict):
+                print("Raw data keys: " + ", ".join(raw_data.keys()))
         else:
-            print("\nWARNING: No raw X-Ray data returned")
+            print("\nWARNING: No raw extraction data returned")
             
         return True
     else:
@@ -78,4 +85,4 @@ def test_groundx_integration():
         return False
 
 if __name__ == "__main__":
-    test_groundx_integration()
+    test_llama_cloud_integration()

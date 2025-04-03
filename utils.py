@@ -100,6 +100,16 @@ def parse_invoice(file_path):
     parser_used = "LlamaCloud"
     
     try:
+        # Check if the API key exists
+        api_key = os.environ.get('LLAMA_CLOUD_API_ENTOS')
+        if not api_key:
+            logger.error("LLAMA_CLOUD_API_ENTOS environment variable is not set")
+            return {
+                'success': False,
+                'error': "LlamaCloud API key not configured. Please set the LLAMA_CLOUD_API_ENTOS environment variable.",
+                'parser_used': parser_used
+            }
+        
         # Parse with LlamaCloud
         logger.info(f"Parsing invoice with LlamaCloud: {file_path}")
         result = parse_invoice_with_llama_cloud(file_path)
@@ -183,8 +193,8 @@ def parse_invoice_with_llama_cloud(file_path):
         }
         
         # Step 1: Upload file to LlamaCloud
-        base_url = "https://api.llama-api.com"
-        upload_url = f"{base_url}/api/documents/upload-url"  # Updated to include /api prefix
+        base_url = "https://api.cloud.llamaindex.ai"  # Updated the base URL with correct domain
+        upload_url = f"{base_url}/api/v1/documents/upload-url"  # Updated to use v1 API path
         
         # Get presigned URL for file upload
         logger.debug("Requesting presigned URL for file upload")
@@ -221,7 +231,7 @@ def parse_invoice_with_llama_cloud(file_path):
         logger.debug("File uploaded successfully")
         
         # Step 2: Process the document for invoice extraction
-        process_url = f"{base_url}/api/documents/{document_id}/process"  # Updated to include /api prefix
+        process_url = f"{base_url}/api/v1/documents/{document_id}/process"  # Updated to use v1 API path
         process_data = {
             "processors": ["invoice-extraction"]
         }
@@ -244,7 +254,7 @@ def parse_invoice_with_llama_cloud(file_path):
         logger.debug(f"Extraction task created: {task_id}")
         
         # Step 3: Poll for task completion
-        task_url = f"{base_url}/api/tasks/{task_id}"  # Updated to include /api prefix
+        task_url = f"{base_url}/api/v1/tasks/{task_id}"  # Updated to use v1 API path
         max_wait_time = MAX_POLLING_TIMEOUT
         poll_interval = 2.0
         start_time = time.time()
@@ -287,7 +297,7 @@ def parse_invoice_with_llama_cloud(file_path):
             }
         
         # Step 4: Get extraction results
-        results_url = f"{base_url}/api/tasks/{task_id}/result"  # Updated to include /api prefix
+        results_url = f"{base_url}/api/v1/tasks/{task_id}/result"  # Updated to use v1 API path
         logger.debug(f"Retrieving extraction results for task: {task_id}")
         
         results_response = requests.get(
@@ -325,143 +335,7 @@ def parse_invoice_with_llama_cloud(file_path):
         }
 
 
-def parse_invoice_with_eyelevel(file_path):
-    """
-    Parse invoice using the Eyelevel.ai API directly
-    
-    Process:
-    1. Upload the file to Eyelevel's /xray/upload endpoint
-    2. Get the xray_url from the response
-    3. Send the xray_url to /xray/parse endpoint
-    4. Return the parsed data or an error message in JSON
-    
-    Args:
-        file_path: Path to the invoice file
-        
-    Returns:
-        dict: Result with parsed data or error message
-    """
-    
-    try:
-        # Check if the file exists
-        if not os.path.exists(file_path):
-            return {
-                'success': False,
-                'error': f"File not found: {file_path}"
-            }
-            
-        # Get the file size
-        file_size = os.path.getsize(file_path)
-        if file_size == 0:
-            return {
-                'success': False,
-                'error': "Empty file"
-            }
-        
-        # Get the API key from environment variables
-        api_key = os.environ.get('EYELEVEL_API_KEY')
-        if not api_key:
-            logger.error("EYELEVEL_API_KEY environment variable is not set")
-            return {
-                'success': False,
-                'error': "API key not configured. Please set the EYELEVEL_API_KEY environment variable."
-            }
-        
-        # Get file name for logging and transformation
-        file_name = os.path.basename(file_path)
-        logger.debug(f"Parsing invoice with Eyelevel.ai API: {file_name}")
-        
-        # Prepare headers for API calls
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "application/json"
-        }
-        
-        # Step 1: Upload file to Eyelevel.ai
-        upload_url = "https://api.eyelevel.ai/xray/upload"
-        
-        logger.debug(f"Uploading file to Eyelevel.ai: {file_name}")
-        
-        # Upload the file using the files parameter in requests
-        with open(file_path, 'rb') as file_object:
-            upload_response = requests.post(
-                upload_url,
-                headers=headers,
-                files={"file": (file_name, file_object)},
-                timeout=API_REQUEST_TIMEOUT
-            )
-        
-        # Check if the upload request was successful
-        upload_response.raise_for_status()
-        upload_data = upload_response.json()
-        
-        # Get the xray_url from the response
-        if 'xray_url' not in upload_data:
-            error_msg = f"X-Ray URL not found in upload response: {upload_data}"
-            logger.error(error_msg)
-            return {
-                'success': False,
-                'error': error_msg
-            }
-            
-        xray_url = upload_data['xray_url']
-        logger.debug(f"File uploaded successfully. X-Ray URL: {xray_url}")
-        
-        # Step 2: Send xray_url to /xray/parse for processing
-        parse_url = "https://api.eyelevel.ai/xray/parse"
-        
-        logger.debug("Sending X-Ray URL for parsing")
-        parse_response = requests.post(
-            parse_url,
-            headers={**headers, "Content-Type": "application/json"},
-            json={"xray_url": xray_url},
-            timeout=API_REQUEST_TIMEOUT
-        )
-        
-        # Check if the parse request was successful
-        parse_response.raise_for_status()
-        parse_data = parse_response.json()
-        
-        # Extract the data field from the response
-        if 'data' not in parse_data:
-            error_msg = f"Data field not found in parse response: {parse_data}"
-            logger.error(error_msg)
-            return {
-                'success': False,
-                'error': error_msg
-            }
-        
-        xray_data = parse_data['data']
-        logger.debug("Successfully parsed document with Eyelevel.ai")
-        
-        # Transform the X-Ray data into our invoice format
-        transformed_data = transform_xray_to_invoice_format(xray_data, file_name)
-        
-        # Use the normalize_invoice function to standardize data across different vendors
-        invoice_data = normalize_invoice(transformed_data)
-        
-        logger.debug(f"Normalized invoice data from Eyelevel.ai: {json.dumps(invoice_data, indent=2)}")
-        
-        return {
-            'success': True,
-            'data': invoice_data,
-            'raw_xray': xray_data  # Return the raw X-Ray data for reference
-        }
-            
-    except requests.exceptions.RequestException as re:
-        error_msg = f"Eyelevel.ai API request failed: {str(re)}"
-        logger.exception(error_msg)
-        return {
-            'success': False,
-            'error': f"Eyelevel parsing failed: {str(re)}"
-        }
-    except Exception as e:
-        error_msg = f"Error parsing invoice with Eyelevel.ai: {str(e)}"
-        logger.exception(error_msg)
-        return {
-            'success': False,
-            'error': f"Eyelevel parsing failed: {str(e)}"
-        }
+
 
 def extract_from_desc(description, pattern):
     """
@@ -562,12 +436,12 @@ def get_vendor_mapping(vendor_name, session=None):
         logger.exception(f"Error getting vendor mapping: {str(e)}")
         return default_mapping
 
-def normalize_invoice(eyelevel_data):
+def normalize_invoice(invoice_data):
     """
-    Normalize invoice data from Eyelevel.ai response with vendor-specific mappings
+    Normalize invoice data from LlamaCloud response with vendor-specific mappings
     
     Args:
-        eyelevel_data: Raw response data from Eyelevel.ai
+        invoice_data: Raw response data from LlamaCloud
         
     Returns:
         dict: Normalized invoice data with consistent fields
@@ -577,7 +451,7 @@ def normalize_invoice(eyelevel_data):
         return v if v is not None else None
     
     # Get vendor name for mapping lookup
-    vendor_name = safe(eyelevel_data.get('vendor', {}).get('name'))
+    vendor_name = safe(invoice_data.get('vendor', {}).get('name'))
     
     # Get vendor-specific field mappings
     mapping = get_vendor_mapping(vendor_name)
@@ -592,7 +466,7 @@ def normalize_invoice(eyelevel_data):
         'due_date': None,
         'total_amount': 0.0,
         'line_items': [],
-        'raw_response': eyelevel_data  # Keep the raw response for debugging
+        'raw_response': invoice_data  # Keep the raw response for debugging
     }
     
     # Apply field mappings to extract invoice header fields
@@ -603,13 +477,13 @@ def normalize_invoice(eyelevel_data):
                 value = None
                 
                 # Check direct property match
-                if field in eyelevel_data:
-                    value = eyelevel_data[field]
+                if field in invoice_data:
+                    value = invoice_data[field]
                 
                 # Check nested properties with dot notation
                 elif '.' in field:
                     parts = field.split('.')
-                    temp = eyelevel_data
+                    temp = invoice_data
                     valid_path = True
                     
                     for part in parts:
@@ -642,10 +516,10 @@ def normalize_invoice(eyelevel_data):
             invoice['total_amount'] = 0.0
     
     # Process line items with consistent field structure
-    if eyelevel_data.get('line_items') and isinstance(eyelevel_data['line_items'], list):
+    if invoice_data.get('line_items') and isinstance(invoice_data['line_items'], list):
         line_item_mappings = field_mappings.get('line_items', {})
         
-        for item in eyelevel_data['line_items']:
+        for item in invoice_data['line_items']:
             line_item = {
                 'description': '',
                 'project_number': '',
@@ -791,17 +665,8 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
         }
 
 
-def transform_xray_to_invoice_format(xray_data, file_name):
-    """
-    Transform X-Ray data from GroundX into a format compatible with our invoice model
-    
-    Args:
-        xray_data: The X-Ray JSON data from GroundX
-        file_name: The original file name of the invoice
-        
-    Returns:
-        dict: Transformed data in a format expected by normalize_invoice()
-    """
+# This function was used for Eyelevel.ai integration and has been removed as part of
+# transitioning to LlamaCloud-only integration
     logger.debug("Transforming X-Ray data to invoice format")
     
     # Initialize the transformed data structure
