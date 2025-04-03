@@ -279,11 +279,19 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
             logger.debug(f"Extraction data keys: {list(extraction_data.keys())}")
             
             # LlamaCloud/LlamaParse often puts the actual data in a 'data' or 'document' field
-            for potential_key in ['data', 'document', 'results', 'content', 'extraction']:
+            for potential_key in ['data', 'document', 'invoice', 'results', 'content', 'extraction']:
                 if potential_key in extraction_data and extraction_data[potential_key]:
                     logger.debug(f"Found potential data in '{potential_key}' field")
                     if isinstance(extraction_data[potential_key], dict):
+                        # Store the original extraction_data in case we need it
+                        original_data = extraction_data
                         extraction_data = extraction_data[potential_key]
+                        
+                        # Add top-level fields that might be needed for ID/status tracking
+                        for key in ['id', 'job_id', 'status', 'document_id']:
+                            if key in original_data and key not in extraction_data:
+                                extraction_data[key] = original_data[key]
+                                
                         logger.debug(f"Using '{potential_key}' as root. New keys: {list(extraction_data.keys())}")
                         break
         else:
@@ -716,7 +724,6 @@ def parse_invoice_with_llama_cloud(file_path):
             logger.debug(f"LlamaCloud job status: {job_status}")
             
             if job_status in ["COMPLETE", "SUCCESS", "success"]:
-                extraction_data = status_data
                 logger.debug("LlamaCloud processing completed successfully")
                 break
             if job_status in ["ERROR", "FAILED", "error", "failed"]:
@@ -727,7 +734,21 @@ def parse_invoice_with_llama_cloud(file_path):
         if time.time() - start_time >= MAX_POLLING_TIMEOUT:
             logger.error("Timeout waiting for LlamaCloud processing")
             return {'success': False, 'error': "Timeout while waiting for LlamaCloud processing"}
-
+            
+        # Now fetch the detailed extraction data with all document information
+        logger.debug(f"Fetching detailed extraction data for job ID: {job_id}")
+        result_url = f"{base_url}/api/parsing/job/{job_id}"
+        result_params = {"detailed": "true"}
+        
+        try:
+            result_response = requests.get(result_url, headers=headers, params=result_params, timeout=API_REQUEST_TIMEOUT)
+            result_response.raise_for_status()
+            extraction_data = result_response.json()
+            logger.debug(f"Received detailed extraction data with keys: {list(extraction_data.keys())}")
+        except Exception as e:
+            logger.error(f"Failed to fetch detailed extraction data: {str(e)}")
+            return {'success': False, 'error': f"Failed to fetch detailed extraction data: {str(e)}"}
+            
         if not extraction_data:
             logger.error("No extraction data received from LlamaCloud")
             return {'success': False, 'error': "No extraction data received from LlamaCloud"}
