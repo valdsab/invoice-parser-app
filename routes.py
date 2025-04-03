@@ -325,6 +325,31 @@ def get_invoice(invoice_id):
         'parser_used': "LlamaCloud"
     }
     
+    # Debug the response data structure
+    logger.debug(f"Response data keys: {list(response_data.keys())}")
+    logger.debug(f"Raw extraction data type: {type(raw_data)}")
+    
+    # Make sure we always have something in raw_extraction_data, even if it's empty
+    if not raw_data or (isinstance(raw_data, dict) and len(raw_data) == 0):
+        logger.debug("No raw extraction data found, providing placeholder structure")
+        
+        # Use the full invoice object as a fallback if nothing else is available
+        try:
+            # Convert the invoice to a dictionary including all fields
+            full_invoice_data = {
+                'invoice': invoice.to_dict(),
+                'status': 'API_SUCCESS_BUT_EMPTY_DATA',
+                'message': 'The API processed the document successfully but returned empty extraction data',
+                'metadata': {
+                    'file_name': invoice.file_name,
+                    'processing_timestamp': datetime.datetime.utcnow().isoformat()
+                }
+            }
+            response_data['raw_extraction_data'] = full_invoice_data
+            logger.debug("Added fallback raw_extraction_data from invoice object")
+        except Exception as e:
+            logger.error(f"Error creating fallback raw_extraction_data: {str(e)}")
+    
     return jsonify(response_data)
 
 @app.route('/create_vendor_bill/<int:invoice_id>', methods=['POST'])

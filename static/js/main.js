@@ -295,25 +295,40 @@ function displayInvoiceDetails(invoiceData) {
                         // Debug what's coming from the server
                         console.log("Complete data object:", data);
                         
+                        // First, check if raw_extraction_data exists in response
                         if (data.raw_extraction_data) {
-                            // LlamaCloud data
+                            // LlamaCloud data is directly in the response
                             rawData = data.raw_extraction_data;
-                            console.log("Raw LlamaCloud extraction data found:", rawData);
+                            console.log("Raw LlamaCloud extraction data found in response:", rawData);
                         } else {
                             console.log("No raw_extraction_data field found in response. Looking in parsed_data for alternative sources.");
                             
-                            // Try to find raw data in alternative locations
+                            // Try to find raw data inside invoice.parsed_data
                             if (data.invoice && data.invoice.parsed_data) {
                                 try {
                                     const parsedDataObj = JSON.parse(data.invoice.parsed_data);
+                                    console.log("Parsed data object structure:", Object.keys(parsedDataObj));
+                                    
                                     if (parsedDataObj.raw_extraction_data) {
                                         rawData = parsedDataObj.raw_extraction_data;
-                                        console.log("Found raw extraction data in parsed_data object:", rawData);
+                                        console.log("Found raw extraction data in parsed_data.raw_extraction_data:", rawData);
+                                    }
+                                    // If job returns SUCCESS but no actual data, show the empty result anyway
+                                    else if (Object.keys(parsedDataObj).length > 0) {
+                                        // Use whatever data we have, even if it's just the response structure
+                                        rawData = parsedDataObj;
+                                        console.log("No specific raw_extraction_data found, using entire parsed object:", rawData);
                                     }
                                 } catch (e) {
                                     console.error("Error parsing invoice.parsed_data:", e);
                                 }
                             }
+                        }
+                        
+                        // If we still have no raw data but have parsed_data, use it
+                        if (!rawData && data.parsed_data) {
+                            rawData = data.parsed_data;
+                            console.log("Using parsed_data as raw data source:", rawData);
                         }
                         
                         if (rawData) {
