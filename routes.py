@@ -162,11 +162,16 @@ def upload_invoice():
             db.session.commit()
             logger.debug(f"Invoice {invoice.id} successfully parsed")
             
+            # Return the invoice details with all extracted data in JSON format
             return jsonify({
                 'success': True,
                 'message': 'Invoice uploaded and parsed successfully',
                 'invoice_id': invoice.id,
-                'invoice_data': invoice.to_dict()
+                'invoice_data': invoice.to_dict(),
+                'line_items': [item.to_dict() for item in invoice.line_items],
+                'parsed_data': invoice_data,
+                'raw_extraction_data': raw_data,
+                'parser_used': 'LlamaCloud'
             })
         else:
             # Update invoice with error
@@ -226,15 +231,48 @@ def fix_stuck_invoices():
 
 @app.route('/invoices', methods=['GET'])
 def list_invoices():
-    """Get list of all processed invoices"""
+    """Get list of all processed invoices with option to include detailed data"""
     try:
         # Check for and fix any invoices stuck in processing state
         fix_stuck_invoices()
         
+        # Optional parameter to include line items and parsed data
+        include_details = request.args.get('include_details', 'false').lower() == 'true'
+        
         invoices = Invoice.query.order_by(Invoice.created_at.desc()).all()
-        return jsonify({
+        
+        # Basic response with invoice data
+        response = {
             'invoices': [invoice.to_dict() for invoice in invoices]
-        })
+        }
+        
+        # Add line items and parsed data if requested
+        if include_details:
+            invoice_details = []
+            for invoice in invoices:
+                invoice_data = invoice.to_dict()
+                
+                # Add line items
+                invoice_data['line_items'] = [item.to_dict() for item in invoice.line_items]
+                
+                # Add parsed data if available
+                if invoice.parsed_data:
+                    try:
+                        stored_data = json.loads(invoice.parsed_data)
+                        if isinstance(stored_data, dict):
+                            if 'normalized' in stored_data:
+                                invoice_data['parsed_data'] = stored_data.get('normalized', {})
+                                invoice_data['raw_extraction_data'] = stored_data.get('raw_extraction_data', {})
+                            else:
+                                invoice_data['parsed_data'] = stored_data
+                    except json.JSONDecodeError:
+                        pass
+                
+                invoice_details.append(invoice_data)
+            
+            response['invoices'] = invoice_details
+        
+        return jsonify(response)
     except Exception as e:
         logger.exception(f"Error listing invoices: {str(e)}")
         return jsonify({
@@ -270,19 +308,14 @@ def get_invoice(invoice_id):
         except json.JSONDecodeError:
             logger.error(f"Invalid JSON data stored for invoice {invoice_id}")
     
-    # Check if client wants raw data (via query parameter)
-    include_raw = request.args.get('include_raw', 'false').lower() == 'true'
-    
+    # Always include raw data by default
     response_data = {
         'invoice': invoice.to_dict(),
         'line_items': line_items,
         'parsed_data': parsed_data,  # Include the normalized parsed data
+        'raw_extraction_data': raw_data,  # Always include raw extraction data
         'parser_used': "LlamaCloud"
     }
-    
-    # Include raw data if requested
-    if include_raw and raw_data:
-        response_data['raw_extraction_data'] = raw_data
     
     return jsonify(response_data)
 
@@ -681,6 +714,8 @@ def apply_vendor_mapping_to_invoice(invoice_id, mapping_id):
                         'message': f'Vendor mapping for {mapping.vendor_name} applied to invoice {invoice_id}',
                         'invoice': invoice.to_dict(),
                         'line_items': [item.to_dict() for item in invoice.line_items],
+                        'parsed_data': normalized_data,
+                        'raw_extraction_data': raw_extraction_data,
                         'parser_used': parser_used
                     })
             except Exception as parse_error:
