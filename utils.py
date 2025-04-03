@@ -100,6 +100,8 @@ def parse_invoice(file_path):
     parser_used = "LlamaCloud"
     
     try:
+        logger.debug(f"=== STARTING INVOICE PARSING: {file_path} ===")
+        
         # Check if the API key exists
         api_key = os.environ.get('LLAMA_CLOUD_API_ENTOS')
         if not api_key:
@@ -117,9 +119,62 @@ def parse_invoice(file_path):
         # Add which parser was used
         result['parser_used'] = parser_used
         
-        # If successful, log it
+        # Validate parse result structure
+        if not isinstance(result, dict):
+            logger.error(f"Invalid parse result type: {type(result)}")
+            return {
+                'success': False,
+                'error': f"Invalid parse result format: expected dictionary, got {type(result)}",
+                'parser_used': parser_used
+            }
+        
+        # Check if parsing was successful
         if result.get('success'):
             logger.info("Successfully parsed invoice with LlamaCloud")
+            logger.debug("Validating parse result data structure")
+            
+            # Check if we have data
+            if 'data' not in result:
+                logger.error("Successful parse result missing 'data' field")
+                return {
+                    'success': False,
+                    'error': "Invalid parse result: missing data field",
+                    'parser_used': parser_used
+                }
+                
+            # Check if we have raw extraction data
+            if 'raw_extraction_data' not in result:
+                logger.warning("Successful parse result missing 'raw_extraction_data' field")
+                # Not a fatal error, will continue
+            
+            # Validate data keys
+            data = result.get('data', {})
+            if not isinstance(data, dict):
+                logger.error(f"Invalid 'data' type: {type(data)}")
+                return {
+                    'success': False,
+                    'error': f"Invalid data format: expected dictionary, got {type(data)}",
+                    'parser_used': parser_used
+                }
+                
+            # Check for required fields in data
+            required_fields = ['vendor_name', 'invoice_number', 'invoice_date', 'total_amount', 'line_items']
+            missing_fields = [field for field in required_fields if field not in data]
+            
+            if missing_fields:
+                logger.warning(f"Parse result missing required fields: {missing_fields}")
+                # Not a fatal error, will continue with nulls
+            
+            # Check line items if they exist
+            if 'line_items' in data and not isinstance(data['line_items'], list):
+                logger.error(f"Invalid 'line_items' type: {type(data['line_items'])}")
+                return {
+                    'success': False,
+                    'error': f"Invalid line_items format: expected list, got {type(data['line_items'])}",
+                    'parser_used': parser_used
+                }
+                
+            logger.debug(f"=== COMPLETED INVOICE PARSING SUCCESSFULLY: {file_path} ===")
         else:
             # Log error
             error_msg = result.get('error', 'Unknown error with LlamaCloud')
@@ -130,7 +185,7 @@ def parse_invoice(file_path):
     except Exception as e:
         # Catch any exception that might occur during parsing
         error_msg = str(e)
-        logger.exception(f"Unexpected error in invoice parsing: {error_msg}")
+        logger.exception(f"=== CRITICAL ERROR PARSING INVOICE: {error_msg} ===")
         
         return {
             'success': False,
@@ -305,18 +360,52 @@ def parse_invoice_with_llama_cloud(file_path):
         logger.debug("Extraction results retrieved successfully")
         
         # Transform LlamaCloud data into our expected format
-        transformed_data = transform_llama_cloud_to_invoice_format(extraction_data, file_name)
-        
-        # Use the normalize_invoice function to standardize data across different vendors
-        invoice_data = normalize_invoice(transformed_data)
-        
-        logger.debug(f"Normalized invoice data: {json.dumps(invoice_data, indent=2)}")
-        
-        return {
-            'success': True,
-            'data': invoice_data,
-            'raw_extraction_data': extraction_data  # Return the raw extraction data for reference
-        }
+        try:
+            transformed_data = transform_llama_cloud_to_invoice_format(extraction_data, file_name)
+            if not transformed_data:
+                logger.error("Failed to transform LlamaCloud data - no result returned")
+                return {
+                    'success': False,
+                    'error': "Failed to transform LlamaCloud extraction data",
+                    'raw_extraction_data': extraction_data
+                }
+                
+            logger.debug(f"Successfully transformed LlamaCloud data with keys: {list(transformed_data.keys()) if isinstance(transformed_data, dict) else 'not a dict'}")
+            
+            # Use the normalize_invoice function to standardize data across different vendors
+            invoice_data = normalize_invoice(transformed_data)
+            if not invoice_data:
+                logger.error("Failed to normalize transformed data - no result returned")
+                return {
+                    'success': False,
+                    'error': "Failed to normalize invoice data",
+                    'raw_extraction_data': extraction_data,
+                    'transformed_data': transformed_data
+                }
+                
+            logger.debug(f"Normalized invoice data: {json.dumps(invoice_data, indent=2)}")
+            
+            # Verify we have at least some data to work with
+            if (not invoice_data.get('vendor_name') and 
+                not invoice_data.get('invoice_number') and 
+                not invoice_data.get('invoice_date') and 
+                not invoice_data.get('total_amount')):
+                logger.warning("All critical invoice fields are empty after normalization")
+                # We'll still return success with empty data, but log a warning
+            
+            return {
+                'success': True,
+                'data': invoice_data,
+                'raw_extraction_data': extraction_data  # Return the raw extraction data for reference
+            }
+            
+        except Exception as e:
+            logger.exception(f"Error during transformation or normalization: {str(e)}")
+            return {
+                'success': False,
+                'error': f"Error processing extraction results: {str(e)}",
+                'raw_extraction_data': extraction_data  # Return the raw data anyway for diagnostic purposes
+            }
         
     except Exception as e:
         logger.exception(f"Error parsing invoice with LlamaCloud: {str(e)}")
@@ -441,8 +530,27 @@ def normalize_invoice(invoice_data):
     def safe(v):
         return v if v is not None else None
     
-    # Get vendor name for mapping lookup
-    vendor_name = safe(invoice_data.get('vendor', {}).get('name'))
+    # Get vendor name for mapping lookup - handle different possible structures
+    vendor_name = None
+    
+    # Try multiple possible paths to find the vendor name
+    if isinstance(invoice_data, dict):
+        # Direct vendor_name field
+        if 'vendor_name' in invoice_data and invoice_data['vendor_name']:
+            vendor_name = invoice_data['vendor_name']
+            logger.debug(f"Found vendor_name directly: {vendor_name}")
+        
+        # Nested in vendor object
+        elif 'vendor' in invoice_data:
+            vendor = invoice_data['vendor']
+            if isinstance(vendor, dict) and 'name' in vendor:
+                vendor_name = vendor['name']
+                logger.debug(f"Found vendor.name: {vendor_name}")
+            elif isinstance(vendor, str):
+                vendor_name = vendor
+                logger.debug(f"Found vendor as string: {vendor_name}")
+    
+    logger.debug(f"Using vendor name for mapping: {vendor_name}")
     
     # Get vendor-specific field mappings
     mapping = get_vendor_mapping(vendor_name)
@@ -574,111 +682,459 @@ def transform_llama_cloud_to_invoice_format(extraction_data, file_name):
         logger.debug(f"Extraction data type: {type(extraction_data)}")
         if isinstance(extraction_data, dict):
             logger.debug(f"Extraction data keys: {list(extraction_data.keys())}")
+            
+            # LlamaCloud/LlamaParse often puts the actual data in a 'data' or 'document' field
+            for potential_key in ['data', 'document', 'results', 'content', 'extraction']:
+                if potential_key in extraction_data and extraction_data[potential_key]:
+                    logger.debug(f"Found potential data in '{potential_key}' field")
+                    if isinstance(extraction_data[potential_key], dict):
+                        extraction_data = extraction_data[potential_key]
+                        logger.debug(f"Using '{potential_key}' as root. New keys: {list(extraction_data.keys())}")
+                        break
         else:
             logger.debug(f"Extraction data is not a dictionary: {str(extraction_data)[:200]}")
+            # Early return with empty data if we don't have a dictionary
+            if not isinstance(extraction_data, dict):
+                logger.error("Cannot process non-dictionary extraction data")
+                raise ValueError(f"Extraction data must be a dictionary, got {type(extraction_data)}")
         
-        # Get the invoice extraction results - the format is different in our API response
-        # In the parsing API, the invoice data may be at the root level
+        # Analyze document structure in more detail to help find key fields
+        def recursive_explore_dict(data, prefix="", max_depth=3, depth=0):
+            """Recursively explore dictionary structure to identify fields"""
+            if depth >= max_depth:
+                return
+                
+            if isinstance(data, dict):
+                for key, value in data.items():
+                    path = f"{prefix}.{key}" if prefix else key
+                    value_type = type(value).__name__
+                    value_preview = str(value)[:50] + "..." if len(str(value)) > 50 else str(value)
+                    logger.debug(f"Field: {path} ({value_type}) = {value_preview}")
+                    recursive_explore_dict(value, path, max_depth, depth + 1)
+            elif isinstance(data, list) and len(data) > 0:
+                logger.debug(f"List at {prefix} with {len(data)} items")
+                if len(data) > 0:
+                    recursive_explore_dict(data[0], f"{prefix}[0]", max_depth, depth + 1)
+        
+        logger.debug("Exploring extraction data structure:")
+        recursive_explore_dict(extraction_data)
+        
+        # Get the invoice extraction results
         invoice_data = extraction_data
         
         # Look for invoice properties in expected locations
         vendor_info = None
-        vendor_name = "Unknown Vendor"
+        vendor_name = None
         
-        # Try to extract vendor info
-        if "vendor" in invoice_data:
-            vendor_info = invoice_data.get("vendor", {})
-            if isinstance(vendor_info, dict):
-                vendor_name = vendor_info.get("name", "Unknown Vendor")
-            elif isinstance(vendor_info, str):
-                vendor_name = vendor_info
+        # Try to extract vendor information from various possible fields
+        vendor_paths = [
+            # Direct paths
+            ("vendor", "name"),
+            ("vendor_name",),
+            ("metadata", "vendor"),
+            ("metadata", "vendor_name"),
+            ("header", "vendor"),
+            ("header", "vendor_name"),
+            ("supplier", "name"),
+            ("supplier_name",),
+            ("from",),
+            # Check directly in root
+            ("seller",),
+            ("seller_name",),
+            ("biller",),
+            ("biller_name",),
+            ("company",),
+            ("company_name",),
+            ("from_company",),
+        ]
+        
+        # Try each potential path
+        for path in vendor_paths:
+            temp = invoice_data
+            valid_path = True
+            
+            for part in path:
+                if isinstance(temp, dict) and part in temp:
+                    temp = temp[part]
+                else:
+                    valid_path = False
+                    break
+            
+            if valid_path and temp:
+                vendor_name = temp
+                logger.debug(f"Found vendor name '{vendor_name}' using path {path}")
+                break
+        
+        # If still no vendor name, try looking in text content
+        if not vendor_name:
+            for key in ["text", "full_text", "content", "raw_text"]:
+                if key in invoice_data and invoice_data[key]:
+                    # Try first 5 lines for company name
+                    text = invoice_data[key]
+                    if isinstance(text, str):
+                        lines = text.split('\n')[:5]
+                        if lines:
+                            vendor_name = lines[0].strip()
+                            logger.debug(f"Using first line of text content as vendor name: '{vendor_name}'")
+                            break
         
         # Extract invoice metadata - try different possible field names
-        invoice_number = invoice_data.get("invoiceNumber", invoice_data.get("invoice_number", ""))
-        invoice_date = invoice_data.get("invoiceDate", invoice_data.get("date", ""))
-        due_date = invoice_data.get("dueDate", invoice_data.get("due_date", ""))
+        invoice_number_paths = [
+            ("invoice_number",),
+            ("invoiceNumber",),
+            ("invoice", "number"),
+            ("header", "invoice_number"),
+            ("metadata", "invoice_number"),
+            ("id",),
+            ("invoice_id",),
+            ("document_number",),
+            ("number",),
+        ]
+        
+        invoice_number = None
+        for path in invoice_number_paths:
+            temp = invoice_data
+            valid_path = True
+            
+            for part in path:
+                if isinstance(temp, dict) and part in temp:
+                    temp = temp[part]
+                else:
+                    valid_path = False
+                    break
+            
+            if valid_path and temp:
+                invoice_number = str(temp)
+                logger.debug(f"Found invoice number '{invoice_number}' using path {path}")
+                break
+        
+        # Extract dates with similar approach
+        invoice_date_paths = [
+            ("invoice_date",),
+            ("invoiceDate",),
+            ("date",),
+            ("issue_date",),
+            ("header", "date"),
+            ("header", "invoice_date"),
+            ("metadata", "date"),
+            ("metadata", "invoice_date"),
+        ]
+        
+        due_date_paths = [
+            ("due_date",),
+            ("dueDate",),
+            ("payment_due",),
+            ("payment_due_date",),
+            ("header", "due_date"),
+            ("metadata", "due_date"),
+        ]
+        
+        invoice_date = None
+        for path in invoice_date_paths:
+            temp = invoice_data
+            valid_path = True
+            
+            for part in path:
+                if isinstance(temp, dict) and part in temp:
+                    temp = temp[part]
+                else:
+                    valid_path = False
+                    break
+            
+            if valid_path and temp:
+                invoice_date = str(temp)
+                logger.debug(f"Found invoice date '{invoice_date}' using path {path}")
+                break
+        
+        due_date = None
+        for path in due_date_paths:
+            temp = invoice_data
+            valid_path = True
+            
+            for part in path:
+                if isinstance(temp, dict) and part in temp:
+                    temp = temp[part]
+                else:
+                    valid_path = False
+                    break
+            
+            if valid_path and temp:
+                due_date = str(temp)
+                logger.debug(f"Found due date '{due_date}' using path {path}")
+                break
         
         # Extract total amount - handle different formats
         total_amount = 0
-        if "totalAmount" in invoice_data:
-            total_info = invoice_data.get("totalAmount", {})
-            if isinstance(total_info, dict) and "amount" in total_info:
-                total_amount = total_info.get("amount", 0)
-            else:
-                total_amount = total_info
-        elif "total" in invoice_data:
-            total_amount = invoice_data.get("total", 0)
+        amount_paths = [
+            ("total_amount",),
+            ("totalAmount",),
+            ("total",),
+            ("amount",),
+            ("grand_total",),
+            ("invoice_total",),
+            ("header", "total_amount"),
+            ("header", "total"),
+            ("summary", "total"),
+            ("summary", "amount"),
+        ]
         
-        # Extract line items
-        line_items_data = invoice_data.get("lineItems", [])
+        for path in amount_paths:
+            temp = invoice_data
+            valid_path = True
+            
+            for part in path:
+                if isinstance(temp, dict) and part in temp:
+                    temp = temp[part]
+                else:
+                    valid_path = False
+                    break
+            
+            if valid_path:
+                # Handle different formats of amount data
+                if isinstance(temp, dict) and "amount" in temp:
+                    total_amount = temp.get("amount", 0)
+                elif isinstance(temp, (int, float)):
+                    total_amount = temp
+                elif isinstance(temp, str):
+                    # Try to convert string to float, removing currency symbols
+                    amount_str = ''.join(c for c in temp if c.isdigit() or c == '.')
+                    try:
+                        total_amount = float(amount_str) if amount_str else 0
+                    except:
+                        total_amount = 0
+                        
+                logger.debug(f"Found total amount '{total_amount}' using path {path}")
+                break
+        
+        # Extract line items - check multiple possible locations and formats
         line_items = []
+        line_item_paths = [
+            ("line_items",),
+            ("lineItems",),
+            ("items",),
+            ("details",),
+            ("invoice_items",),
+            ("invoice_lines",),
+            ("lines",),
+        ]
         
+        line_items_data = []
+        for path in line_item_paths:
+            temp = invoice_data
+            valid_path = True
+            
+            for part in path:
+                if isinstance(temp, dict) and part in temp:
+                    temp = temp[part]
+                else:
+                    valid_path = False
+                    break
+            
+            if valid_path and isinstance(temp, list) and len(temp) > 0:
+                line_items_data = temp
+                logger.debug(f"Found {len(line_items_data)} line items using path {path}")
+                break
+        
+        # Try to parse line items with different field naming conventions
         for item in line_items_data:
-            # Extract line item fields
-            description = item.get("description", "")
-            quantity = item.get("quantity", 0)
-            unit_price = item.get("unitPrice", {}).get("amount", 0)
-            amount = item.get("amount", {}).get("amount", 0)
-            tax = item.get("tax", {}).get("amount", 0)
+            if not isinstance(item, dict):
+                logger.warning(f"Skipping non-dictionary line item: {item}")
+                continue
+                
+            # Log the structure of this line item
+            logger.debug(f"Processing line item with keys: {list(item.keys())}")
+            
+            # Extract line item fields with flexible field names
+            description = None
+            for key in ["description", "desc", "item", "product", "service", "name", "title"]:
+                if key in item and item[key]:
+                    description = str(item[key])
+                    break
+            
+            quantity = None
+            for key in ["quantity", "qty", "units", "count"]:
+                if key in item and item[key] is not None:
+                    quantity_val = item[key]
+                    if isinstance(quantity_val, (int, float)):
+                        quantity = quantity_val
+                    elif isinstance(quantity_val, str):
+                        try:
+                            quantity = float(quantity_val)
+                        except:
+                            pass
+                    elif isinstance(quantity_val, dict) and "value" in quantity_val:
+                        quantity = quantity_val["value"]
+                    break
+            
+            # Default to 1 if no quantity found
+            if quantity is None:
+                quantity = 1.0
+            
+            unit_price = None
+            for key in ["unit_price", "unitPrice", "price", "rate", "unit_cost"]:
+                if key in item:
+                    price_val = item[key]
+                    if isinstance(price_val, (int, float)):
+                        unit_price = price_val
+                    elif isinstance(price_val, str):
+                        try:
+                            # Remove currency symbols and convert to float
+                            price_str = ''.join(c for c in price_val if c.isdigit() or c == '.')
+                            unit_price = float(price_str) if price_str else 0
+                        except:
+                            pass
+                    elif isinstance(price_val, dict) and "amount" in price_val:
+                        unit_price = price_val["amount"]
+                    elif isinstance(price_val, dict) and "value" in price_val:
+                        unit_price = price_val["value"]
+                    break
+            
+            if unit_price is None:
+                unit_price = 0.0
+            
+            amount = None
+            for key in ["amount", "total", "line_total", "subtotal", "line_amount"]:
+                if key in item:
+                    amount_val = item[key]
+                    if isinstance(amount_val, (int, float)):
+                        amount = amount_val
+                    elif isinstance(amount_val, str):
+                        try:
+                            # Remove currency symbols and convert to float
+                            amount_str = ''.join(c for c in amount_val if c.isdigit() or c == '.')
+                            amount = float(amount_str) if amount_str else 0
+                        except:
+                            pass
+                    elif isinstance(amount_val, dict) and "amount" in amount_val:
+                        amount = amount_val["amount"]
+                    elif isinstance(amount_val, dict) and "value" in amount_val:
+                        amount = amount_val["value"]
+                    break
+            
+            # If amount is not found but we have quantity and unit_price, calculate it
+            if amount is None and quantity is not None and unit_price is not None:
+                amount = quantity * unit_price
+            elif amount is None:
+                amount = 0.0
+            
+            tax = None
+            for key in ["tax", "vat", "gst", "sales_tax", "tax_amount"]:
+                if key in item:
+                    tax_val = item[key]
+                    if isinstance(tax_val, (int, float)):
+                        tax = tax_val
+                    elif isinstance(tax_val, str):
+                        try:
+                            # Remove currency symbols and convert to float
+                            tax_str = ''.join(c for c in tax_val if c.isdigit() or c == '.')
+                            tax = float(tax_str) if tax_str else 0
+                        except:
+                            pass
+                    elif isinstance(tax_val, dict) and "amount" in tax_val:
+                        tax = tax_val["amount"]
+                    elif isinstance(tax_val, dict) and "value" in tax_val:
+                        tax = tax_val["value"]
+                    break
+            
+            if tax is None:
+                tax = 0.0
             
             # Look for project number and activity code in the description
             project_number = None
             project_name = None
             activity_code = None
             
-            # Attempt to extract project number and activity code using regex patterns
-            if description:
+            # Extract project data from specific keys if available
+            for key in ["project", "project_number", "job", "job_number", "project_id"]:
+                if key in item and item[key]:
+                    project_number = str(item[key])
+                    break
+            
+            for key in ["project_name", "job_name", "project_description"]:
+                if key in item and item[key]:
+                    project_name = str(item[key])
+                    break
+            
+            for key in ["activity_code", "activity", "task_code", "task"]:
+                if key in item and item[key]:
+                    activity_code = str(item[key])
+                    break
+            
+            # Attempt to extract project number and activity code using regex patterns if still not found
+            if description and not project_number:
                 project_number_pattern = r'(?:Project|PN|Job)\s*(?:Number|#|No\.?|ID)?\s*[:=\s]\s*([A-Z0-9-]+)'
-                activity_code_pattern = r'(?:Activity|Task)\s*(?:Code|#|No\.?)?\s*[:=\s]\s*([A-Z0-9-]+)'
-                
                 project_number_match = re.search(project_number_pattern, description)
                 if project_number_match:
                     project_number = project_number_match.group(1)
-                
+            
+            if description and not activity_code:
+                activity_code_pattern = r'(?:Activity|Task)\s*(?:Code|#|No\.?)?\s*[:=\s]\s*([A-Z0-9-]+)'
                 activity_code_match = re.search(activity_code_pattern, description)
                 if activity_code_match:
                     activity_code = activity_code_match.group(1)
             
-            # Create line item
+            # Create line item with all extracted data
             line_item = {
-                "description": description,
-                "quantity": quantity,
-                "unit_price": unit_price,
-                "amount": amount,
-                "tax": tax,
+                "description": description if description else "",
+                "quantity": float(quantity),
+                "unit_price": float(unit_price),
+                "amount": float(amount),
+                "tax": float(tax),
                 "project_number": project_number,
                 "project_name": project_name,
                 "activity_code": activity_code
             }
             
             line_items.append(line_item)
+            logger.debug(f"Processed line item: description='{description}', amount={amount}")
+        
+        # If no line items were found, but we have table data, try to extract from tables
+        if not line_items and "tables" in invoice_data and isinstance(invoice_data["tables"], list):
+            logger.debug("No line items found, attempting to extract from tables")
+            for table in invoice_data["tables"]:
+                if isinstance(table, dict) and "rows" in table and isinstance(table["rows"], list):
+                    # Skip the header row, use the rest as line items
+                    for row in table["rows"][1:] if len(table["rows"]) > 1 else table["rows"]:
+                        if isinstance(row, dict) and "cells" in row and isinstance(row["cells"], list):
+                            cells = row["cells"]
+                            if len(cells) >= 2:  # At minimum we need description and amount
+                                line_item = {
+                                    "description": cells[0] if len(cells) > 0 else "",
+                                    "quantity": float(cells[1]) if len(cells) > 1 and cells[1] and cells[1].replace('.','',1).isdigit() else 1.0,
+                                    "unit_price": float(cells[2]) if len(cells) > 2 and cells[2] and cells[2].replace('.','',1).isdigit() else 0.0,
+                                    "amount": float(cells[3]) if len(cells) > 3 and cells[3] and cells[3].replace('.','',1).isdigit() else 0.0,
+                                    "tax": 0.0,
+                                    "project_number": None,
+                                    "project_name": None,
+                                    "activity_code": None
+                                }
+                                line_items.append(line_item)
         
         # Assemble the transformed data
         transformed_data = {
-            "vendor_name": vendor_name,
-            "invoice_number": invoice_number,
-            "invoice_date": invoice_date,
-            "due_date": due_date,
-            "total_amount": total_amount,
+            "vendor_name": vendor_name if vendor_name else "Unknown Vendor",
+            "invoice_number": invoice_number if invoice_number else "",
+            "invoice_date": invoice_date if invoice_date else "",
+            "due_date": due_date if due_date else "",
+            "total_amount": float(total_amount) if total_amount else 0.0,
             "file_name": file_name,
             "line_items": line_items
         }
         
-        logger.debug(f"Successfully transformed LlamaCloud data for: {file_name}")
+        # Log a summary of what we extracted
+        logger.debug(f"Transformation summary for {file_name}:")
+        logger.debug(f"  - Vendor: {transformed_data['vendor_name']}")
+        logger.debug(f"  - Invoice #: {transformed_data['invoice_number']}")
+        logger.debug(f"  - Date: {transformed_data['invoice_date']}")
+        logger.debug(f"  - Total: {transformed_data['total_amount']}")
+        logger.debug(f"  - Line items: {len(transformed_data['line_items'])}")
+        
         return transformed_data
         
     except Exception as e:
         logger.exception(f"Error transforming LlamaCloud data: {str(e)}")
-        # Return minimal data structure to prevent further errors
-        return {
-            "vendor_name": "Unknown",
-            "invoice_number": "",
-            "invoice_date": "",
-            "due_date": "",
-            "total_amount": 0,
-            "file_name": file_name,
-            "line_items": []
-        }
+        # Raise the exception instead of silently returning empty data
+        raise ValueError(f"Failed to transform LlamaCloud data: {str(e)}")
 
 
 # Only using LlamaCloud for document parsing now
